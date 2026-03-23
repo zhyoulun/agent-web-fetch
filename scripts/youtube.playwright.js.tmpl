@@ -1,0 +1,198 @@
+const { chromium } = require('@playwright/test');
+const fs = require('fs');
+const path = require('path');
+
+const query = {{ js .Query }};
+const profileDir = {{ js .ProfileDir }};
+const channel = {{ js .Channel }};
+const maxResults = {{ .MaxResults }};
+const timeoutMs = {{ .TimeoutMS }};
+const headlessMode = {{ js .HeadlessMode }};
+const snapshot = {{ if .Snapshot }}true{{ else }}false{{ end }};
+const snapshotStamp = {{ js .SnapshotStamp }};
+const projectRoot = {{ js .ProjectRoot }};
+const outputJSON = {{ js .OutputPath }};
+
+function writeResult(data) {
+  fs.writeFileSync(outputJSON, JSON.stringify(data), 'utf8');
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function resultSelector() {
+  return 'ytd-video-renderer a#video-title';
+}
+
+async function waitUntilSearchReady(page, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const count = await page.locator(resultSelector()).count();
+    if (count > 0) {
+      return { mode: 'ready' };
+    }
+    await sleep(800);
+  }
+  return { mode: 'error', error: '等待搜索结果超时' };
+}
+
+function normalizeYoutubeLink(raw) {
+  if (!raw) {
+    return '';
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(String(raw).trim(), 'https://www.youtube.com');
+  } catch {
+    return '';
+  }
+
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    return '';
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  if (host !== 'www.youtube.com' && host !== 'youtube.com' && host !== 'm.youtube.com' && host !== 'youtu.be') {
+    return '';
+  }
+
+  if (host === 'youtu.be') {
+    const id = parsed.pathname.replaceAll('/', '').trim();
+    if (!id) {
+      return '';
+    }
+    return 'https://www.youtube.com/watch?v=' + encodeURIComponent(id);
+  }
+
+  const pathname = parsed.pathname.toLowerCase();
+  if (pathname === '/results' || pathname === '/') {
+    return '';
+  }
+  parsed.hash = '';
+  return parsed.toString();
+}
+
+async function collectResults(page, maxResults) {
+  const list = page.locator(resultSelector());
+  const count = await list.count();
+  if (count <= 0) {
+    return { error: '未找到结果节点', results: [] };
+  }
+
+  const results = [];
+  const seen = new Set();
+  for (let i = 0; i < count && results.length < maxResults; i++) {
+    const item = list.nth(i);
+    const title = String(await item.innerText().catch(() => '')).trim();
+    if (!title) {
+      continue;
+    }
+    const href = String(await item.getAttribute('href').catch(() => '') || '').trim();
+    if (!href) {
+      continue;
+    }
+    const cleanURL = normalizeYoutubeLink(href);
+    if (!cleanURL || seen.has(cleanURL)) {
+      continue;
+    }
+    seen.add(cleanURL);
+    results.push({ title, url: cleanURL });
+  }
+  return { error: '', results };
+}
+
+function sanitizeFileName(input) {
+  const source = String(input || '').trim();
+  if (!source) {
+    return 'untitled';
+  }
+  const safe = source
+    .replace(/[^a-zA-Z0-9\-_ ]+/g, '')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[-_]+|[-_]+$/g, '');
+  if (!safe) {
+    return 'untitled';
+  }
+  return safe.slice(0, 48);
+}
+
+async function main() {
+  if (headlessMode !== 'true' && headlessMode !== 'false' && headlessMode !== 'first') {
+    writeResult({ status: 'error', error: '不支持的 headless 模式', results: [], snapshotPath: '' });
+    return;
+  }
+
+  async function runAttempt(useHeadless) {
+    let context;
+    try {
+      context = await chromium.launchPersistentContext(profileDir, {
+        headless: useHeadless,
+        timeout: timeoutMs,
+        ...(channel ? { channel } : {})
+      });
+      const page = await context.newPage();
+      const searchURL = 'https://www.youtube.com/results?search_query=' + encodeURIComponent(query);
+      await page.goto(searchURL, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+
+      const ready = await waitUntilSearchReady(page, timeoutMs);
+      if (ready.mode === 'error') {
+        return { status: 'error', error: ready.error, results: [], snapshotPath: '' };
+      }
+
+      const collected = await collectResults(page, maxResults);
+      if (collected.error) {
+        return { status: 'error', error: collected.error, results: [], snapshotPath: '' };
+      }
+
+      let snapshotPath = '';
+      if (snapshot) {
+        await page.waitForLoadState('load', { timeout: 5000 }).catch(() => {});
+        await page.waitForTimeout(900);
+        const snapshotDir = path.join(projectRoot, 'snapshots', snapshotStamp);
+        fs.mkdirSync(snapshotDir, { recursive: true });
+        const filePath = path.join(snapshotDir, 'search-' + sanitizeFileName(query) + '.png');
+        await page.screenshot({ path: filePath, fullPage: true, timeout: 15000 });
+        snapshotPath = path.resolve(filePath);
+      }
+
+      return {
+        status: 'ok',
+        results: collected.results.map(item => ({ title: item.title, url: item.url })),
+        snapshotPath
+      };
+    } catch (error) {
+      return {
+        status: 'error',
+        error: String(error && error.message ? error.message : error),
+        results: [],
+        snapshotPath: ''
+      };
+    } finally {
+      if (context) {
+        await context.close();
+      }
+    }
+  }
+
+  if (headlessMode === 'first') {
+    const first = await runAttempt(true);
+    if (first.status === 'ok') {
+      writeResult(first);
+      process.exitCode = 0;
+      return;
+    }
+    const second = await runAttempt(false);
+    writeResult(second);
+    process.exitCode = second.status === 'ok' ? 0 : 1;
+    return;
+  }
+
+  const final = await runAttempt(headlessMode === 'true');
+  writeResult(final);
+  process.exitCode = final.status === 'ok' ? 0 : 1;
+}
+
+main();

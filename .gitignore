@@ -1,0 +1,10 @@
+node_modules/
+.chrome-profile/
+package-lock.json
+package.json
+.idea/
+agent-web-fetch
+
+.tmp-playwright/
+snapshots/
+test-results/

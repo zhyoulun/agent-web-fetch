@@ -1,0 +1,26 @@
+package main
+
+import (
+	"bytes"
+	_ "embed"
+	"fmt"
+	"strconv"
+	"text/template"
+)
+
+//go:embed scripts/amazon.playwright.js.tmpl
+var amazonPlaywrightScriptTemplate string
+
+var amazonPlaywrightScriptParser = template.Must(template.New("amazon-playwright-script").Funcs(template.FuncMap{
+	"js": func(input string) string {
+		return strconv.Quote(input)
+	},
+}).Parse(amazonPlaywrightScriptTemplate))
+
+func renderAmazonPlaywrightScript(data PlaywrightScriptData) (string, error) {
+	var buf bytes.Buffer
+	if err := amazonPlaywrightScriptParser.Execute(&buf, data); err != nil {
+		return "", fmt.Errorf("渲染 amazon 脚本模板失败: %w", err)
+	}
+	return buf.String(), nil
+}

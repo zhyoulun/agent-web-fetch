@@ -1,0 +1,123 @@
+const { chromium } = require('@playwright/test');
+const fs = require('fs');
+const path = require('path');
+
+const query = {{ js .Query }};
+const profileDir = {{ js .ProfileDir }};
+const channel = {{ js .Channel }};
+const maxResults = {{ .MaxResults }};
+const timeoutMs = {{ .TimeoutMS }};
+const headlessMode = {{ js .HeadlessMode }};
+const snapshot = {{ if .Snapshot }}true{{ else }}false{{ end }};
+const snapshotStamp = {{ js .SnapshotStamp }};
+const projectRoot = {{ js .ProjectRoot }};
+const outputJSON = {{ js .OutputPath }};
+
+function writeResult(data) { fs.writeFileSync(outputJSON, JSON.stringify(data), 'utf8'); }
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+function selectors() { return ['div.s-main-slot h2 a.a-link-normal', 'h2 a.a-link-normal.s-no-outline']; }
+
+function normalizeLink(raw) {
+  if (!raw) return '';
+  let parsed;
+  try { parsed = new URL(String(raw).trim(), 'https://www.amazon.com'); } catch { return ''; }
+  if (!['http:', 'https:'].includes(parsed.protocol)) return '';
+  const host = parsed.hostname.toLowerCase();
+  if (!host.includes('amazon.')) return '';
+  if (!parsed.pathname.includes('/dp/') && !parsed.pathname.includes('/gp/')) return '';
+  parsed.hash = '';
+  return parsed.toString();
+}
+
+async function waitUntilReady(page, timeout) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    for (const selector of selectors()) {
+      if (await page.locator(selector).count() > 0) return { mode: 'ready' };
+    }
+    await sleep(800);
+  }
+  return { mode: 'error', error: '等待搜索结果超时' };
+}
+
+async function collectResults(page, max) {
+  const results = [];
+  const seen = new Set();
+  let foundAny = false;
+  for (const selector of selectors()) {
+    const list = page.locator(selector);
+    const count = await list.count();
+    if (count <= 0) continue;
+    foundAny = true;
+    for (let i = 0; i < count && results.length < max; i++) {
+      const item = list.nth(i);
+      const title = String(await item.innerText().catch(() => '')).trim();
+      if (!title) continue;
+      let href = String(await item.getAttribute('href').catch(() => '') || '').trim();
+      if (!href) href = String(await item.locator('xpath=ancestor::a[1]').getAttribute('href').catch(() => '') || '').trim();
+      if (!href) continue;
+      const clean = normalizeLink(href);
+      if (!clean || seen.has(clean)) continue;
+      seen.add(clean);
+      results.push({ title, url: clean });
+    }
+  }
+  if (!foundAny) return { error: '未找到结果节点', results: [] };
+  return { error: '', results };
+}
+
+function sanitizeFileName(input) {
+  const source = String(input || '').trim();
+  if (!source) return 'untitled';
+  const safe = source.replace(/[^a-zA-Z0-9\-_ ]+/g, '').replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^[-_]+|[-_]+$/g, '');
+  return safe ? safe.slice(0, 48) : 'untitled';
+}
+
+async function runAttempt(useHeadless) {
+  let context;
+  try {
+    context = await chromium.launchPersistentContext(profileDir, { headless: useHeadless, timeout: timeoutMs, ...(channel ? { channel } : {}) });
+    const page = await context.newPage();
+    await page.goto('https://www.amazon.com/s?k=' + encodeURIComponent(query), { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+    const ready = await waitUntilReady(page, timeoutMs);
+    if (ready.mode === 'error') return { status: 'error', error: ready.error, results: [], snapshotPath: '' };
+    const collected = await collectResults(page, maxResults);
+    if (collected.error) return { status: 'error', error: collected.error, results: [], snapshotPath: '' };
+    let snapshotPath = '';
+    if (snapshot) {
+      await page.waitForLoadState('load', { timeout: 5000 }).catch(() => {});
+      await page.waitForTimeout(900);
+      const dir = path.join(projectRoot, 'snapshots', snapshotStamp);
+      fs.mkdirSync(dir, { recursive: true });
+      const filePath = path.join(dir, 'search-' + sanitizeFileName(query) + '.png');
+      await page.screenshot({ path: filePath, fullPage: true, timeout: 15000 });
+      snapshotPath = path.resolve(filePath);
+    }
+    return { status: 'ok', results: collected.results.map(item => ({ title: item.title, url: item.url })), snapshotPath };
+  } catch (error) {
+    return { status: 'error', error: String(error && error.message ? error.message : error), results: [], snapshotPath: '' };
+  } finally {
+    if (context) await context.close();
+  }
+}
+
+async function main() {
+  if (!['true', 'false', 'first'].includes(headlessMode)) {
+    writeResult({ status: 'error', error: '不支持的 headless 模式', results: [], snapshotPath: '' });
+    process.exitCode = 1;
+    return;
+  }
+  if (headlessMode === 'first') {
+    const first = await runAttempt(true);
+    if (first.status === 'ok') { writeResult(first); process.exitCode = 0; return; }
+    const second = await runAttempt(false);
+    writeResult(second);
+    process.exitCode = second.status === 'ok' ? 0 : 1;
+    return;
+  }
+  const final = await runAttempt(headlessMode === 'true');
+  writeResult(final);
+  process.exitCode = final.status === 'ok' ? 0 : 1;
+}
+
+main();
