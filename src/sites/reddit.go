@@ -1,4 +1,4 @@
-package main
+package sites
 
 import (
 	"bytes"
@@ -17,7 +17,7 @@ var redditPlaywrightScriptParser = template.Must(template.New("reddit-playwright
 	},
 }).Parse(redditPlaywrightScriptTemplate))
 
-func renderRedditPlaywrightScript(data PlaywrightScriptData) (string, error) {
+func RenderRedditPlaywrightScript(data PlaywrightScriptData) (string, error) {
 	var buf bytes.Buffer
 	if err := redditPlaywrightScriptParser.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("渲染 reddit 脚本模板失败: %w", err)

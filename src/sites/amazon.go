@@ -1,4 +1,4 @@
-package main
+package sites
 
 import (
 	"bytes"
@@ -17,7 +17,7 @@ var amazonPlaywrightScriptParser = template.Must(template.New("amazon-playwright
 	},
 }).Parse(amazonPlaywrightScriptTemplate))
 
-func renderAmazonPlaywrightScript(data PlaywrightScriptData) (string, error) {
+func RenderAmazonPlaywrightScript(data PlaywrightScriptData) (string, error) {
 	var buf bytes.Buffer
 	if err := amazonPlaywrightScriptParser.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("渲染 amazon 脚本模板失败: %w", err)

@@ -1,4 +1,4 @@
-package main
+package sites
 
 import (
 	"bytes"
@@ -17,7 +17,7 @@ var wikipediaPlaywrightScriptParser = template.Must(template.New("wikipedia-play
 	},
 }).Parse(wikipediaPlaywrightScriptTemplate))
 
-func renderWikipediaPlaywrightScript(data PlaywrightScriptData) (string, error) {
+func RenderWikipediaPlaywrightScript(data PlaywrightScriptData) (string, error) {
 	var buf bytes.Buffer
 	if err := wikipediaPlaywrightScriptParser.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("渲染 wikipedia 脚本模板失败: %w", err)

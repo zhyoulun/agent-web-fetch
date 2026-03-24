@@ -1,4 +1,4 @@
-package main
+package sites
 
 import (
 	"bytes"
@@ -17,7 +17,7 @@ var googlePlaywrightScriptParser = template.Must(template.New("google-playwright
 	},
 }).Parse(googlePlaywrightScriptTemplate))
 
-func renderGooglePlaywrightScript(data PlaywrightScriptData) (string, error) {
+func RenderGooglePlaywrightScript(data PlaywrightScriptData) (string, error) {
 	var buf bytes.Buffer
 	if err := googlePlaywrightScriptParser.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("渲染 google 脚本模板失败: %w", err)

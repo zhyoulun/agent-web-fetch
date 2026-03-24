@@ -1,4 +1,4 @@
-package main
+package sites
 
 import (
 	"bytes"
@@ -17,7 +17,7 @@ var youtubePlaywrightScriptParser = template.Must(template.New("youtube-playwrig
 	},
 }).Parse(youtubePlaywrightScriptTemplate))
 
-func renderYouTubePlaywrightScript(data PlaywrightScriptData) (string, error) {
+func RenderYouTubePlaywrightScript(data PlaywrightScriptData) (string, error) {
 	var buf bytes.Buffer
 	if err := youtubePlaywrightScriptParser.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("渲染 youtube 脚本模板失败: %w", err)

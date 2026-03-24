@@ -1,4 +1,4 @@
-package main
+package sites
 
 import (
 	"bytes"
@@ -17,7 +17,7 @@ var duckDuckGoPlaywrightScriptParser = template.Must(template.New("duckduckgo-pl
 	},
 }).Parse(duckDuckGoPlaywrightScriptTemplate))
 
-func renderDuckDuckGoPlaywrightScript(data PlaywrightScriptData) (string, error) {
+func RenderDuckDuckGoPlaywrightScript(data PlaywrightScriptData) (string, error) {
 	var buf bytes.Buffer
 	if err := duckDuckGoPlaywrightScriptParser.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("渲染 duckduckgo 脚本模板失败: %w", err)

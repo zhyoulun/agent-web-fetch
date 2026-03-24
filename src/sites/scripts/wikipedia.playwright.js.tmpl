@@ -21,42 +21,96 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function selectors() {
-  return ['.mw-search-result-heading a', '#firstHeading', '#mw-content-text a[href^="/wiki/"]'];
+function visibleSearchInputSelector() {
+  return 'input.cdx-text-input__input:visible, input[type="search"]:visible, #searchInput:visible, input[name="search"]:visible';
+}
+
+function suggestionItemSelector() {
+  return '.cdx-menu-item, [role="option"]';
+}
+
+function fallbackResultSelectors() {
+  return ['.mw-search-result-heading a', '#mw-content-text .searchresults a', '#firstHeading'];
 }
 
 function normalizeLink(raw) {
   if (!raw) return '';
   let parsed;
   try {
-    parsed = new URL(String(raw).trim(), 'https://en.wikipedia.org');
+    parsed = new URL(String(raw).trim(), 'https://zh.wikipedia.org');
   } catch {
     return '';
   }
   if (!['http:', 'https:'].includes(parsed.protocol)) return '';
-  if (parsed.hostname !== 'en.wikipedia.org') return '';
+  if (parsed.hostname !== 'zh.wikipedia.org') return '';
+  if (parsed.pathname === '/w/index.php' && parsed.searchParams.get('title') === 'Special:Search') {
+    const target = String(parsed.searchParams.get('search') || '').trim();
+    if (!target) return '';
+    return 'https://zh.wikipedia.org/wiki/' + encodeURIComponent(target).replace(/%20/g, '_');
+  }
   if (!parsed.pathname.startsWith('/wiki/')) return '';
   parsed.hash = '';
   return parsed.toString();
 }
 
-async function waitUntilReady(page, timeoutMs) {
+async function waitForSuggestions(page, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    for (const selector of selectors()) {
-      const count = await page.locator(selector).count();
-      if (count > 0) return { mode: 'ready' };
+    if (await page.locator(suggestionItemSelector()).count() > 0) {
+      return true;
     }
     await sleep(800);
   }
-  return { mode: 'error', error: '等待搜索结果超时' };
+  return false;
 }
 
-async function collectResults(page, max) {
+async function waitForFallbackResults(page, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    for (const selector of fallbackResultSelectors()) {
+      if (await page.locator(selector).count() > 0) {
+        return true;
+      }
+    }
+    await sleep(800);
+  }
+  return false;
+}
+
+async function collectSuggestionResults(page, max) {
+  const rawResults = await page.evaluate((maxResults) => {
+    const items = Array.from(document.querySelectorAll('.cdx-menu-item, [role="option"]')).slice(0, maxResults);
+    return items.map((item) => {
+      const titleNode = item.querySelector('.cdx-menu-item__text__title, .cdx-search-result-title');
+      const link = item.querySelector('a');
+      return {
+        title: String((titleNode && titleNode.textContent) || (link && link.textContent) || '').replace(/\s+/g, ' ').trim(),
+        href: String((link && link.href) || '').trim(),
+      };
+    });
+  }, max);
+
+  const results = [];
+  const seen = new Set();
+  if (rawResults.length <= 0) return { error: '未找到联想结果节点', results: [] };
+  for (const item of rawResults) {
+    const title = String(item.title || '').trim();
+    const href = String(item.href || '').trim();
+    if (!title || !href) continue;
+    const clean = normalizeLink(href);
+    if (!clean || seen.has(clean)) continue;
+    seen.add(clean);
+    results.push({ title, url: clean });
+  }
+  if (results.length === 0) return { error: '未提取到有效联想结果', results: [] };
+  return { error: '', results };
+}
+
+async function collectFallbackResults(page, max) {
   const results = [];
   const seen = new Set();
   let foundAny = false;
-  for (const selector of selectors()) {
+  for (const selector of fallbackResultSelectors()) {
     const list = page.locator(selector);
     const count = await list.count();
     if (count <= 0) continue;
@@ -67,7 +121,9 @@ async function collectResults(page, max) {
       if (!title) continue;
       let href = String(await item.getAttribute('href').catch(() => '') || '').trim();
       if (!href) href = String(await item.locator('xpath=ancestor::a[1]').getAttribute('href').catch(() => '') || '').trim();
-      if (!href) continue;
+      if (!href) {
+        href = 'https://zh.wikipedia.org/wiki/' + encodeURIComponent(title).replace(/%20/g, '_');
+      }
       const clean = normalizeLink(href);
       if (!clean || seen.has(clean)) continue;
       seen.add(clean);
@@ -94,10 +150,24 @@ async function runAttempt(useHeadless) {
       ...(channel ? { channel } : {})
     });
     const page = await context.newPage();
-    await page.goto('https://en.wikipedia.org/w/index.php?search=' + encodeURIComponent(query), { waitUntil: 'domcontentloaded', timeout: timeoutMs });
-    const ready = await waitUntilReady(page, timeoutMs);
-    if (ready.mode === 'error') return { status: 'error', error: ready.error, results: [], snapshotPath: '' };
-    const collected = await collectResults(page, maxResults);
+    await page.goto('https://zh.wikipedia.org/wiki/Wikipedia:%E9%A6%96%E9%A1%B5', { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+    const input = page.locator(visibleSearchInputSelector()).first();
+    if (await input.count() <= 0) {
+      return { status: 'error', error: '未找到维基百科搜索输入框', results: [], snapshotPath: '' };
+    }
+    await input.click().catch(() => {});
+    await input.fill('');
+    await input.type(query, { delay: 80 });
+    let collected;
+    const hasSuggestions = await waitForSuggestions(page, Math.min(timeoutMs, 8000));
+    if (hasSuggestions) {
+      collected = await collectSuggestionResults(page, maxResults);
+    } else {
+      await input.press('Enter').catch(() => {});
+      const hasFallbackResults = await waitForFallbackResults(page, timeoutMs);
+      if (!hasFallbackResults) return { status: 'error', error: '等待维基百科搜索结果超时', results: [], snapshotPath: '' };
+      collected = await collectFallbackResults(page, maxResults);
+    }
     if (collected.error) return { status: 'error', error: collected.error, results: [], snapshotPath: '' };
     let snapshotPath = '';
     if (snapshot) {
@@ -106,7 +176,7 @@ async function runAttempt(useHeadless) {
       const snapshotDir = path.join(projectRoot, 'snapshots', snapshotStamp);
       fs.mkdirSync(snapshotDir, { recursive: true });
       const filePath = path.join(snapshotDir, 'search-' + sanitizeFileName(query) + '.png');
-      await page.screenshot({ path: filePath, fullPage: true, timeout: 15000 });
+      await page.screenshot({ path: filePath, timeout: 15000 });
       snapshotPath = path.resolve(filePath);
     }
     return { status: 'ok', results: collected.results.map(item => ({ title: item.title, url: item.url })), snapshotPath };
@@ -130,9 +200,8 @@ async function main() {
       process.exitCode = 0;
       return;
     }
-    const second = await runAttempt(false);
-    writeResult(second);
-    process.exitCode = second.status === 'ok' ? 0 : 1;
+    writeResult(first);
+    process.exitCode = 1;
     return;
   }
   const final = await runAttempt(headlessMode === 'true');

@@ -10,6 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/zhyoulun/agent-web-fetch/src"
+	"github.com/zhyoulun/agent-web-fetch/src/sites"
 )
 
 type SearchResult struct {
@@ -33,33 +36,10 @@ type ScriptResult struct {
 	SnapshotPath string         `json:"snapshotPath"`
 }
 
-type PlaywrightScriptData struct {
-	// Engine 是搜索引擎名称
-	Engine string
-	// Query 是搜索关键词
-	Query string
-	// ProfileDir 是浏览器用户目录，用于复用登录态与 cookie
-	ProfileDir string
-	// Channel 是 Playwright 浏览器通道，如 chrome/chromium/msedge
-	Channel string
-	// MaxResults 是最多返回结果数
-	MaxResults int
-	// TimeoutMS 是页面等待与操作超时时间（毫秒）
-	TimeoutMS int64
-	// HeadlessMode 支持 true/false/first
-	HeadlessMode string
-	// Snapshot 控制是否输出搜索结果页截图
-	Snapshot bool
-	// SnapshotStamp 用于截图目录时间戳
-	SnapshotStamp string
-	// ProjectRoot 是项目根目录，用于拼接输出路径
-	ProjectRoot string
-	// OutputPath 是脚本回写 JSON 结果文件路径
-	OutputPath string
-}
+var playwrightFactory = src.NewPlaywrightFactory()
 
 func main() {
-	engine := flag.String("engine", "google", "搜索引擎: google/youtube/wikipedia/weather/amazon/temu/reddit/bing/duckduckgo/baidu")
+	engine := flag.String("engine", "google", "搜索引擎: google/youtube/wikipedia/amazon/reddit/bing/duckduckgo/baidu/tiktok")
 	query := flag.String("query", "", "搜索关键词")
 	profileDir := flag.String("profile-dir", "./.chrome-profile", "Chrome/Chromium User Data 目录")
 	channel := flag.String("channel", "chrome", "浏览器通道: chrome/chromium/msedge 等")
@@ -75,8 +55,8 @@ func main() {
 		os.Exit(2)
 	}
 	engineValue := strings.ToLower(strings.TrimSpace(*engine))
-	if !isSupportedEngine(engineValue) {
-		fmt.Fprintln(os.Stderr, "参数错误: --engine 仅支持 google/youtube/wikipedia/weather/amazon/temu/reddit/bing/duckduckgo/baidu")
+	if !playwrightFactory.Supports(engineValue) {
+		fmt.Fprintln(os.Stderr, "参数错误: --engine 仅支持 google/youtube/wikipedia/amazon/reddit/bing/duckduckgo/baidu/tiktok")
 		os.Exit(2)
 	}
 	if *maxResults <= 0 {
@@ -134,43 +114,29 @@ func installPlaywrightBrowsers() error {
 }
 
 func runSearch(engine, query, profileDir, channel string, maxResults int, timeout time.Duration, headlessMode string, snapshot bool) ([]SearchResult, string, error) {
-	result, err := runSearchOnce(engine, query, profileDir, channel, maxResults, timeout, headlessMode, snapshot)
-	if err != nil {
-		return nil, "", err
-	}
-	if result.Status == ScriptStatusHumanVerification {
-		return nil, "", errors.New("检测到人机验证，请使用 --headless false 或 --headless first")
-	}
-	if result.Status != ScriptStatusOK {
-		return nil, "", fmt.Errorf("搜索失败: %s", result.Status)
-	}
-	return result.Results, result.SnapshotPath, nil
-}
-
-func runSearchOnce(engine, query, profileDir, channel string, maxResults int, timeout time.Duration, headlessMode string, snapshot bool) (*ScriptResult, error) {
 	if err := ensurePlaywrightTestPackage(); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	result, err := executePlaywrightScript(engine, query, profileDir, channel, maxResults, timeout, headlessMode, snapshot)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	switch ScriptStatus(strings.TrimSpace(string(result.Status))) {
 	case ScriptStatusOK:
 		if len(result.Results) == 0 {
-			return nil, errors.New("未获取到搜索结果")
+			return nil, "", errors.New("未获取到搜索结果")
 		}
-		return result, nil
+		return result.Results, result.SnapshotPath, nil
 	case ScriptStatusHumanVerification:
-		return result, nil
+		return nil, "", errors.New("检测到人机验证，请使用 --headless false 或 --headless first")
 	case ScriptStatusError:
 		msg := strings.TrimSpace(result.Error)
 		if msg == "" {
 			msg = "脚本执行失败"
 		}
-		return nil, errors.New(msg)
+		return nil, "", errors.New(msg)
 	default:
-		return nil, fmt.Errorf("未知脚本状态: %s", result.Status)
+		return nil, "", fmt.Errorf("未知脚本状态: %s", result.Status)
 	}
 }
 
@@ -189,7 +155,7 @@ func executePlaywrightScript(engine, query, profileDir, channel string, maxResul
 	_ = outputFile.Close()
 	defer os.Remove(outputPath)
 
-	scriptContent, err := playwrightScript(PlaywrightScriptData{
+	scriptContent, err := playwrightFactory.Render(sites.PlaywrightScriptData{
 		Engine:        engine,
 		Query:         query,
 		ProfileDir:    absProfileDir,
@@ -201,15 +167,35 @@ func executePlaywrightScript(engine, query, profileDir, channel string, maxResul
 		SnapshotStamp: time.Now().Format("20060102-150405"),
 		ProjectRoot:   projectRoot,
 		OutputPath:    outputPath,
-	}, engine)
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	cmd := exec.Command("npx", "node", "-")
+	tempScriptDir := filepath.Join(projectRoot, ".tmp-playwright")
+	if err := os.MkdirAll(tempScriptDir, 0o755); err != nil {
+		return nil, fmt.Errorf("创建脚本目录失败: %w", err)
+	}
+
+	scriptFile, err := os.CreateTemp(tempScriptDir, "pw-script-*.js")
+	if err != nil {
+		return nil, fmt.Errorf("创建脚本文件失败: %w", err)
+	}
+	scriptPath := scriptFile.Name()
+	if _, err := scriptFile.WriteString(scriptContent); err != nil {
+		_ = scriptFile.Close()
+		_ = os.Remove(scriptPath)
+		return nil, fmt.Errorf("写入脚本文件失败: %w", err)
+	}
+	if err := scriptFile.Close(); err != nil {
+		_ = os.Remove(scriptPath)
+		return nil, fmt.Errorf("关闭脚本文件失败: %w", err)
+	}
+	defer os.Remove(scriptPath)
+
+	cmd := exec.Command("node", scriptPath)
 	cmd.Dir = projectRoot
 	cmd.Env = os.Environ()
-	cmd.Stdin = strings.NewReader(scriptContent)
 	commandOutput, cmdErr := cmd.CombinedOutput()
 
 	payloadBytes, readErr := os.ReadFile(outputPath)
@@ -261,40 +247,4 @@ func ensurePlaywrightTestPackage() error {
 		return fmt.Errorf("安装 @playwright/test 失败: %w\n%s", err, strings.TrimSpace(string(output)))
 	}
 	return nil
-}
-
-func playwrightScript(data PlaywrightScriptData, engine string) (string, error) {
-	switch engine {
-	case "google":
-		return renderGooglePlaywrightScript(data)
-	case "youtube":
-		return renderYouTubePlaywrightScript(data)
-	case "wikipedia":
-		return renderWikipediaPlaywrightScript(data)
-	case "weather":
-		return renderWeatherPlaywrightScript(data)
-	case "amazon":
-		return renderAmazonPlaywrightScript(data)
-	case "temu":
-		return renderTemuPlaywrightScript(data)
-	case "reddit":
-		return renderRedditPlaywrightScript(data)
-	case "bing":
-		return renderBingPlaywrightScript(data)
-	case "duckduckgo":
-		return renderDuckDuckGoPlaywrightScript(data)
-	case "baidu":
-		return renderBaiduPlaywrightScript(data)
-	default:
-		return "", fmt.Errorf("不支持的搜索引擎: %s", engine)
-	}
-}
-
-func isSupportedEngine(engine string) bool {
-	switch engine {
-	case "google", "youtube", "wikipedia", "weather", "amazon", "temu", "reddit", "bing", "duckduckgo", "baidu":
-		return true
-	default:
-		return false
-	}
 }

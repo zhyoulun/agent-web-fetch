@@ -15,16 +15,27 @@ const outputJSON = {{ js .OutputPath }};
 
 function writeResult(data) { fs.writeFileSync(outputJSON, JSON.stringify(data), 'utf8'); }
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
-function selectors() { return ['a[data-testid="EnhancedLocalSearchListItemLink"]', 'a[href*="/weather/"]']; }
+function selectors() { return ['li.b_algo h2 a', 'h2 a']; }
+
+function tryDecodeBingRedirect(value) {
+  if (!value || !value.startsWith('a1')) return '';
+  try {
+    const text = Buffer.from(value.slice(2), 'base64').toString('utf8');
+    if (text.startsWith('http://') || text.startsWith('https://')) return text;
+  } catch {}
+  return '';
+}
 
 function normalizeLink(raw) {
   if (!raw) return '';
   let parsed;
-  try { parsed = new URL(String(raw).trim(), 'https://weather.com'); } catch { return ''; }
+  try { parsed = new URL(String(raw).trim(), 'https://www.bing.com'); } catch { return ''; }
   if (!['http:', 'https:'].includes(parsed.protocol)) return '';
   const host = parsed.hostname.toLowerCase();
-  if (!host.endsWith('weather.com')) return '';
-  if (!parsed.pathname.includes('/weather/')) return '';
+  if (host.endsWith('bing.com') && parsed.pathname.startsWith('/ck/a')) {
+    const decoded = tryDecodeBingRedirect(parsed.searchParams.get('u') || '');
+    if (decoded) return decoded;
+  }
   parsed.hash = '';
   return parsed.toString();
 }
@@ -78,7 +89,7 @@ async function runAttempt(useHeadless) {
   try {
     context = await chromium.launchPersistentContext(profileDir, { headless: useHeadless, timeout: timeoutMs, ...(channel ? { channel } : {}) });
     const page = await context.newPage();
-    await page.goto('https://weather.com/search/enhancedlocalsearch?where=' + encodeURIComponent(query), { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+    await page.goto('https://www.bing.com/search?q=' + encodeURIComponent(query), { waitUntil: 'domcontentloaded', timeout: timeoutMs });
     const ready = await waitUntilReady(page, timeoutMs);
     if (ready.mode === 'error') return { status: 'error', error: ready.error, results: [], snapshotPath: '' };
     const collected = await collectResults(page, maxResults);
@@ -110,9 +121,8 @@ async function main() {
   if (headlessMode === 'first') {
     const first = await runAttempt(true);
     if (first.status === 'ok') { writeResult(first); process.exitCode = 0; return; }
-    const second = await runAttempt(false);
-    writeResult(second);
-    process.exitCode = second.status === 'ok' ? 0 : 1;
+    writeResult(first);
+    process.exitCode = 1;
     return;
   }
   const final = await runAttempt(headlessMode === 'true');

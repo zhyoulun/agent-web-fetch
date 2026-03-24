@@ -1,4 +1,4 @@
-package main
+package sites
 
 import (
 	"bytes"
@@ -17,7 +17,7 @@ var bingPlaywrightScriptParser = template.Must(template.New("bing-playwright-scr
 	},
 }).Parse(bingPlaywrightScriptTemplate))
 
-func renderBingPlaywrightScript(data PlaywrightScriptData) (string, error) {
+func RenderBingPlaywrightScript(data PlaywrightScriptData) (string, error) {
 	var buf bytes.Buffer
 	if err := bingPlaywrightScriptParser.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("渲染 bing 脚本模板失败: %w", err)

@@ -184,9 +184,8 @@ async function main() {
       process.exitCode = 0;
       return;
     }
-    const second = await runAttempt(false);
-    writeResult(second);
-    process.exitCode = second.status === 'ok' ? 0 : 1;
+    writeResult(first);
+    process.exitCode = 1;
     return;
   }
 

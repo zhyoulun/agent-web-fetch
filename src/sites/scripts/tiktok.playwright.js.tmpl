@@ -1,0 +1,301 @@
+const { chromium } = require('@playwright/test');
+const fs = require('fs');
+const path = require('path');
+
+const query = {{ js .Query }};
+const profileDir = {{ js .ProfileDir }};
+const channel = {{ js .Channel }};
+const maxResults = {{ .MaxResults }};
+const timeoutMs = {{ .TimeoutMS }};
+const headlessMode = {{ js .HeadlessMode }};
+const snapshot = {{ if .Snapshot }}true{{ else }}false{{ end }};
+const snapshotStamp = {{ js .SnapshotStamp }};
+const projectRoot = {{ js .ProjectRoot }};
+const outputJSON = {{ js .OutputPath }};
+
+function writeResult(data) {
+  fs.writeFileSync(outputJSON, JSON.stringify(data), 'utf8');
+}
+
+function finish(data) {
+  writeResult(data);
+  process.exit(data.status === 'ok' ? 0 : 1);
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function resultSelector() {
+  return '[data-e2e="search_top-item"]';
+}
+
+function detectHumanVerification(url, content) {
+  const lowURL = String(url || '').toLowerCase();
+  for (const marker of ['captcha', 'verify']) {
+    if (lowURL.includes(marker)) {
+      return marker;
+    }
+  }
+
+  const body = String(content || '').toLowerCase();
+  const keywords = [
+    'verify to continue',
+    'complete the puzzle',
+    'drag the puzzle piece',
+    'press and hold',
+    '继续访问前请验证',
+    '拖动滑块',
+    '请完成验证'
+  ];
+  for (const keyword of keywords) {
+    if (body.includes(keyword.toLowerCase())) {
+      return keyword;
+    }
+  }
+  return '';
+}
+
+async function waitUntilSearchReady(page, timeout, headless) {
+  const deadline = Date.now() + timeout;
+  let prompted = false;
+
+  while (Date.now() < deadline) {
+    if (await page.locator(resultSelector()).count() > 0) {
+      return { mode: 'ready' };
+    }
+
+    const reason = detectHumanVerification(page.url(), await page.content());
+    if (reason) {
+      if (headless) {
+        return { mode: 'human_verification', reason };
+      }
+      if (!prompted) {
+        prompted = true;
+        console.log('检测到 TikTok 人机验证或登录，请在浏览器中手动完成，程序会自动继续。');
+      }
+      await sleep(1200);
+      continue;
+    }
+
+    await sleep(800);
+  }
+
+  if (prompted) {
+    return { mode: 'error', error: '人工处理后仍未检测到 TikTok 搜索结果，请重试' };
+  }
+  return { mode: 'error', error: '等待 TikTok 搜索结果超时' };
+}
+
+function normalizeTikTokLink(raw) {
+  if (!raw) {
+    return '';
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(String(raw).trim(), 'https://www.tiktok.com');
+  } catch {
+    return '';
+  }
+
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    return '';
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  if (host !== 'www.tiktok.com' && host !== 'tiktok.com' && !host.endsWith('.tiktok.com')) {
+    return '';
+  }
+
+  if (!parsed.pathname.includes('/video/')) {
+    return '';
+  }
+
+  parsed.search = '';
+  parsed.hash = '';
+  return parsed.toString();
+}
+
+function normalizeTikTokTitle(raw) {
+  const title = String(raw || '').replace(/\s+/g, ' ').trim();
+  if (!title) {
+    return '';
+  }
+
+  const markers = ['创作的 ', 'created by ', 'posted by '];
+  for (const marker of markers) {
+    const index = title.toLowerCase().lastIndexOf(marker.toLowerCase());
+    if (index >= 0) {
+      const trimmed = title.slice(index + marker.length).trim();
+      if (trimmed) {
+        return trimmed;
+      }
+    }
+  }
+
+  return title;
+}
+
+async function collectResults(page, max) {
+  const list = page.locator(resultSelector());
+  const count = await list.count();
+  if (count <= 0) {
+    return { error: '未找到 TikTok 结果节点', results: [] };
+  }
+
+  const results = [];
+  const seen = new Set();
+  for (let i = 0; i < count && results.length < max; i++) {
+    const item = list.nth(i);
+    const payload = await item.evaluate(node => {
+      const findText = selectors => {
+        for (const selector of selectors) {
+          const element = node.querySelector(selector);
+          const text = element
+            ? String(
+              element.getAttribute && element.getAttribute('alt')
+                ? element.getAttribute('alt')
+                : (element.textContent || '')
+            ).trim()
+            : '';
+          if (text) {
+            return text;
+          }
+        }
+        return '';
+      };
+
+      const linkElement = node.querySelector('a[href*="/video/"]');
+      return {
+        title: findText([
+          'img[alt]',
+          '[data-e2e="search-card-video-caption"]',
+          '[data-e2e="search-card-desc"]',
+          '[data-e2e="search-card-user-unique-id"]'
+        ]),
+        href: linkElement && linkElement.getAttribute ? (linkElement.getAttribute('href') || '').trim() : ''
+      };
+    }).catch(() => ({ title: '', href: '' }));
+
+    const title = normalizeTikTokTitle(payload.title);
+    if (!title) {
+      continue;
+    }
+
+    const href = String(payload.href || '').trim();
+    const cleanURL = normalizeTikTokLink(href);
+    if (!cleanURL || seen.has(cleanURL)) {
+      continue;
+    }
+
+    seen.add(cleanURL);
+    results.push({ title, url: cleanURL });
+  }
+
+  if (results.length === 0) {
+    return { error: '未提取到有效的 TikTok 视频结果', results: [] };
+  }
+  return { error: '', results };
+}
+
+function sanitizeFileName(input) {
+  const source = String(input || '').trim();
+  if (!source) {
+    return 'untitled';
+  }
+  const safe = source
+    .replace(/[^a-zA-Z0-9\-_ ]+/g, '')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[-_]+|[-_]+$/g, '');
+  if (!safe) {
+    return 'untitled';
+  }
+  return safe.slice(0, 48);
+}
+
+async function runAttempt(useHeadless) {
+  let context;
+  try {
+    context = await chromium.launchPersistentContext(profileDir, {
+      headless: useHeadless,
+      timeout: timeoutMs,
+      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      viewport: { width: 1440, height: 1600 },
+      locale: 'zh-CN',
+      ...(channel ? { channel } : {})
+    });
+
+    const page = await context.newPage();
+    const searchURL = 'https://www.tiktok.com/search?q=' + encodeURIComponent(query);
+    await page.goto(searchURL, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+
+    const ready = await waitUntilSearchReady(page, timeoutMs, useHeadless);
+    if (ready.mode === 'human_verification') {
+      return { status: 'human_verification', reason: ready.reason, results: [], snapshotPath: '' };
+    }
+    if (ready.mode === 'error') {
+      return { status: 'error', error: ready.error, results: [], snapshotPath: '' };
+    }
+
+    const collected = await collectResults(page, maxResults);
+    if (collected.error) {
+      return { status: 'error', error: collected.error, results: [], snapshotPath: '' };
+    }
+
+    let snapshotPath = '';
+    if (snapshot) {
+      await page.waitForLoadState('load', { timeout: 5000 }).catch(() => {});
+      await page.waitForTimeout(900);
+      const snapshotDir = path.join(projectRoot, 'snapshots', snapshotStamp);
+      fs.mkdirSync(snapshotDir, { recursive: true });
+      const filePath = path.join(snapshotDir, 'search-' + sanitizeFileName(query) + '.png');
+      await page.screenshot({ path: filePath, fullPage: true, timeout: 15000 });
+      snapshotPath = path.resolve(filePath);
+    }
+
+    return {
+      status: 'ok',
+      results: collected.results.map(item => ({ title: item.title, url: item.url })),
+      snapshotPath
+    };
+  } catch (error) {
+    return {
+      status: 'error',
+      error: String(error && error.message ? error.message : error),
+      results: [],
+      snapshotPath: ''
+    };
+  } finally {
+    if (context) {
+      await Promise.race([
+        context.close(),
+        sleep(2000)
+      ]).catch(() => {});
+    }
+  }
+}
+
+async function main() {
+  if (!['true', 'false', 'first'].includes(headlessMode)) {
+    finish({ status: 'error', error: '不支持的 headless 模式', results: [], snapshotPath: '' });
+  }
+
+  if (headlessMode === 'first') {
+    const first = await runAttempt(true);
+    if (first.status === 'ok') {
+      finish(first);
+    }
+    if (first.status === 'human_verification') {
+      const second = await runAttempt(false);
+      finish(second);
+    }
+    finish(first);
+  }
+
+  const final = await runAttempt(headlessMode === 'true');
+  finish(final);
+}
+
+main();

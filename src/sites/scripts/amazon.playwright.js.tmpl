@@ -15,15 +15,18 @@ const outputJSON = {{ js .OutputPath }};
 
 function writeResult(data) { fs.writeFileSync(outputJSON, JSON.stringify(data), 'utf8'); }
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
-function selectors() { return ['a[data-testid="result-title-a"]', '[data-testid="result"] h2 a']; }
+function resultSelector() { return '[data-component-type="s-search-result"]'; }
+function titleLinkSelectors() { return ['[data-cy="title-recipe"] a', 'h2 a.a-link-normal[href*="/dp/"]']; }
+function titleSelectors() { return ['[data-cy="title-recipe"]', '.a-size-base-plus']; }
 
 function normalizeLink(raw) {
   if (!raw) return '';
   let parsed;
-  try { parsed = new URL(String(raw).trim(), 'https://duckduckgo.com'); } catch { return ''; }
+  try { parsed = new URL(String(raw).trim(), 'https://www.amazon.com'); } catch { return ''; }
   if (!['http:', 'https:'].includes(parsed.protocol)) return '';
   const host = parsed.hostname.toLowerCase();
-  if (!host.endsWith('duckduckgo.com') && !host.endsWith('duck.com')) return '';
+  if (!host.includes('amazon.')) return '';
+  if (!parsed.pathname.includes('/dp/') && !parsed.pathname.includes('/gp/')) return '';
   parsed.hash = '';
   return parsed.toString();
 }
@@ -31,9 +34,7 @@ function normalizeLink(raw) {
 async function waitUntilReady(page, timeout) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    for (const selector of selectors()) {
-      if (await page.locator(selector).count() > 0) return { mode: 'ready' };
-    }
+    if (await page.locator(resultSelector()).count() > 0) return { mode: 'ready' };
     await sleep(800);
   }
   return { mode: 'error', error: '等待搜索结果超时' };
@@ -42,26 +43,44 @@ async function waitUntilReady(page, timeout) {
 async function collectResults(page, max) {
   const results = [];
   const seen = new Set();
-  let foundAny = false;
-  for (const selector of selectors()) {
-    const list = page.locator(selector);
-    const count = await list.count();
-    if (count <= 0) continue;
-    foundAny = true;
-    for (let i = 0; i < count && results.length < max; i++) {
-      const item = list.nth(i);
-      const title = String(await item.innerText().catch(() => '')).trim();
-      if (!title) continue;
-      let href = String(await item.getAttribute('href').catch(() => '') || '').trim();
-      if (!href) href = String(await item.locator('xpath=ancestor::a[1]').getAttribute('href').catch(() => '') || '').trim();
-      if (!href) continue;
-      const clean = normalizeLink(href);
-      if (!clean || seen.has(clean)) continue;
-      seen.add(clean);
-      results.push({ title, url: clean });
+  const list = page.locator(resultSelector());
+  const count = await list.count();
+  if (count <= 0) return { error: '未找到结果节点', results: [] };
+  for (let i = 0; i < count && results.length < max; i++) {
+    const item = list.nth(i);
+    let title = '';
+    let href = '';
+
+    for (const selector of titleLinkSelectors()) {
+      const link = item.locator(selector).first();
+      if (await link.count() <= 0) continue;
+      title = String(await link.innerText().catch(() => '')).trim();
+      href = String(await link.getAttribute('href').catch(() => '') || '').trim();
+      if (title && href) break;
     }
+
+    if (!title) {
+      for (const selector of titleSelectors()) {
+        const titleNode = item.locator(selector).first();
+        if (await titleNode.count() <= 0) continue;
+        title = String(await titleNode.innerText().catch(() => '')).trim();
+        if (title) break;
+      }
+    }
+
+    if (!href) {
+      href = String(await item.locator('a[href*="/dp/"], a[href*="/gp/"]').first().getAttribute('href').catch(() => '') || '').trim();
+    }
+
+    if (!title || !href) continue;
+    const clean = normalizeLink(href);
+    if (!clean || seen.has(clean)) continue;
+    seen.add(clean);
+    results.push({ title, url: clean });
   }
-  if (!foundAny) return { error: '未找到结果节点', results: [] };
+  if (results.length === 0) {
+    return { error: '未提取到有效结果', results: [] };
+  }
   return { error: '', results };
 }
 
@@ -77,7 +96,7 @@ async function runAttempt(useHeadless) {
   try {
     context = await chromium.launchPersistentContext(profileDir, { headless: useHeadless, timeout: timeoutMs, ...(channel ? { channel } : {}) });
     const page = await context.newPage();
-    await page.goto('https://duckduckgo.com/?q=' + encodeURIComponent(query), { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+    await page.goto('https://www.amazon.com/s?k=' + encodeURIComponent(query), { waitUntil: 'domcontentloaded', timeout: timeoutMs });
     const ready = await waitUntilReady(page, timeoutMs);
     if (ready.mode === 'error') return { status: 'error', error: ready.error, results: [], snapshotPath: '' };
     const collected = await collectResults(page, maxResults);
@@ -109,9 +128,8 @@ async function main() {
   if (headlessMode === 'first') {
     const first = await runAttempt(true);
     if (first.status === 'ok') { writeResult(first); process.exitCode = 0; return; }
-    const second = await runAttempt(false);
-    writeResult(second);
-    process.exitCode = second.status === 'ok' ? 0 : 1;
+    writeResult(first);
+    process.exitCode = 1;
     return;
   }
   const final = await runAttempt(headlessMode === 'true');

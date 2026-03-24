@@ -1,4 +1,4 @@
-package main
+package sites
 
 import (
 	"bytes"
@@ -17,7 +17,7 @@ var baiduPlaywrightScriptParser = template.Must(template.New("baidu-playwright-s
 	},
 }).Parse(baiduPlaywrightScriptTemplate))
 
-func renderBaiduPlaywrightScript(data PlaywrightScriptData) (string, error) {
+func RenderBaiduPlaywrightScript(data PlaywrightScriptData) (string, error) {
 	var buf bytes.Buffer
 	if err := baiduPlaywrightScriptParser.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("渲染 baidu 脚本模板失败: %w", err)

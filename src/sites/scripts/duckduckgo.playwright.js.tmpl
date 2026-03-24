@@ -15,26 +15,17 @@ const outputJSON = {{ js .OutputPath }};
 
 function writeResult(data) { fs.writeFileSync(outputJSON, JSON.stringify(data), 'utf8'); }
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
-function selectors() { return ['li.b_algo h2 a', 'h2 a']; }
-
-function tryDecodeBingRedirect(value) {
-  if (!value || !value.startsWith('a1')) return '';
-  try {
-    const text = Buffer.from(value.slice(2), 'base64').toString('utf8');
-    if (text.startsWith('http://') || text.startsWith('https://')) return text;
-  } catch {}
-  return '';
-}
+function selectors() { return ['a.result__a', 'a[data-testid="result-title-a"]', '[data-testid="result"] h2 a']; }
 
 function normalizeLink(raw) {
   if (!raw) return '';
   let parsed;
-  try { parsed = new URL(String(raw).trim(), 'https://www.bing.com'); } catch { return ''; }
+  try { parsed = new URL(String(raw).trim(), 'https://duckduckgo.com'); } catch { return ''; }
   if (!['http:', 'https:'].includes(parsed.protocol)) return '';
   const host = parsed.hostname.toLowerCase();
-  if (host.endsWith('bing.com') && parsed.pathname.startsWith('/ck/a')) {
-    const decoded = tryDecodeBingRedirect(parsed.searchParams.get('u') || '');
-    if (decoded) return decoded;
+  if (host.endsWith('duckduckgo.com') || host.endsWith('duck.com')) {
+    const target = parsed.searchParams.get('uddg');
+    return target ? normalizeLink(target) : '';
   }
   parsed.hash = '';
   return parsed.toString();
@@ -87,9 +78,16 @@ function sanitizeFileName(input) {
 async function runAttempt(useHeadless) {
   let context;
   try {
-    context = await chromium.launchPersistentContext(profileDir, { headless: useHeadless, timeout: timeoutMs, ...(channel ? { channel } : {}) });
+    context = await chromium.launchPersistentContext(profileDir, {
+      headless: useHeadless,
+      timeout: timeoutMs,
+      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      viewport: { width: 1440, height: 1600 },
+      locale: 'zh-CN',
+      ...(channel ? { channel } : {}),
+    });
     const page = await context.newPage();
-    await page.goto('https://www.bing.com/search?q=' + encodeURIComponent(query), { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+    await page.goto('https://html.duckduckgo.com/html/?q=' + encodeURIComponent(query), { waitUntil: 'domcontentloaded', timeout: timeoutMs });
     const ready = await waitUntilReady(page, timeoutMs);
     if (ready.mode === 'error') return { status: 'error', error: ready.error, results: [], snapshotPath: '' };
     const collected = await collectResults(page, maxResults);
@@ -121,9 +119,8 @@ async function main() {
   if (headlessMode === 'first') {
     const first = await runAttempt(true);
     if (first.status === 'ok') { writeResult(first); process.exitCode = 0; return; }
-    const second = await runAttempt(false);
-    writeResult(second);
-    process.exitCode = second.status === 'ok' ? 0 : 1;
+    writeResult(first);
+    process.exitCode = 1;
     return;
   }
   const final = await runAttempt(headlessMode === 'true');
