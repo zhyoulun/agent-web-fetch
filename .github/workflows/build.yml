@@ -1,0 +1,65 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - "**"
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run tests
+        run: go test ./src/...
+
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            output: agent-web-fetch-linux-amd64
+          - goos: linux
+            goarch: arm64
+            output: agent-web-fetch-linux-arm64
+          - goos: windows
+            goarch: amd64
+            output: agent-web-fetch-windows-amd64.exe
+          - goos: darwin
+            goarch: amd64
+            output: agent-web-fetch-darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            output: agent-web-fetch-darwin-arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build binary
+        env:
+          CGO_ENABLED: 0
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          go build -trimpath -o "dist/${{ matrix.output }}" ./src/cmd
+
