@@ -94,7 +94,13 @@ function sanitizeFileName(input) {
 async function runAttempt(useHeadless) {
   let context;
   try {
-    context = await chromium.launchPersistentContext(profileDir, { headless: useHeadless, timeout: timeoutMs, ...(channel ? { channel } : {}) });
+    context = await chromium.launchPersistentContext(profileDir, {
+      headless: useHeadless,
+      timeout: timeoutMs,
+      ignoreDefaultArgs: ['--enable-automation'],
+      args: ['--disable-blink-features=AutomationControlled'],
+      ...(channel ? { channel } : {})
+    });
     const page = await context.newPage();
     await page.goto('https://www.amazon.com/s?k=' + encodeURIComponent(query), { waitUntil: 'domcontentloaded', timeout: timeoutMs });
     const ready = await waitUntilReady(page, timeoutMs);

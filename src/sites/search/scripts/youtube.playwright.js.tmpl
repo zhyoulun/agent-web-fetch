@@ -5,6 +5,7 @@ const path = require('path');
 const query = {{ js .Query }};
 const profileDir = {{ js .ProfileDir }};
 const channel = {{ js .Channel }};
+const loginRequested = {{ if .Login }}true{{ else }}false{{ end }};
 const maxResults = {{ .MaxResults }};
 const timeoutMs = {{ .TimeoutMS }};
 const headlessMode = {{ js .HeadlessMode }};
@@ -12,6 +13,7 @@ const snapshot = {{ if .Snapshot }}true{{ else }}false{{ end }};
 const snapshotStamp = {{ js .SnapshotStamp }};
 const projectRoot = {{ js .ProjectRoot }};
 const outputJSON = {{ js .OutputPath }};
+const manualActionTimeoutMs = Math.min(timeoutMs, 10 * 60 * 1000);
 
 function writeResult(data) {
   fs.writeFileSync(outputJSON, JSON.stringify(data), 'utf8');
@@ -25,6 +27,24 @@ function resultSelector() {
   return 'ytd-video-renderer a#video-title';
 }
 
+function signedInSelector() {
+  return [
+    'button#avatar-btn',
+    'ytd-topbar-menu-button-renderer button#avatar-btn',
+    'button[aria-label*="Google Account"]',
+    'button[aria-label*="Google 帐号"]'
+  ].join(', ');
+}
+
+function signInSelector() {
+  return [
+    'a[href*="accounts.google.com/ServiceLogin"]',
+    'ytd-button-renderer a[href*="accounts.google.com"]',
+    'a[aria-label*="登录"]',
+    'a[aria-label*="Sign in"]'
+  ].join(', ');
+}
+
 async function waitUntilSearchReady(page, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -35,6 +55,74 @@ async function waitUntilSearchReady(page, timeoutMs) {
     await sleep(800);
   }
   return { mode: 'error', error: '等待搜索结果超时' };
+}
+
+async function detectLoginState(page) {
+  if (await page.locator(signInSelector()).count().catch(() => 0) > 0) {
+    return 'signed_out';
+  }
+  if (await page.locator(signedInSelector()).count().catch(() => 0) > 0) {
+    return 'signed_in';
+  }
+  const bodyText = String(await page.locator('body').innerText({ timeout: 1000 }).catch(() => '') || '');
+  if (bodyText.includes('\n登录\n') || bodyText.toLowerCase().includes('sign in')) {
+    return 'signed_out';
+  }
+  return 'unknown';
+}
+
+async function waitForLoginState(page, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = await detectLoginState(page);
+    if (state !== 'unknown') {
+      return state;
+    }
+    await sleep(400);
+  }
+  return 'unknown';
+}
+
+async function ensureGoogleLogin(page, useHeadless) {
+  if (!loginRequested) {
+    return { mode: 'ready' };
+  }
+
+  if (useHeadless) {
+    return { mode: 'human_verification', reason: 'google_login_required' };
+  }
+
+  await page.goto('https://www.youtube.com', { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+  await page.waitForTimeout(1500);
+
+  const initialState = await waitForLoginState(page, 5000);
+  if (initialState === 'signed_in') {
+    return { mode: 'ready' };
+  }
+
+  const signInLink = page.locator(signInSelector()).first();
+  if (await signInLink.count().catch(() => 0) > 0) {
+    await signInLink.click({ timeout: 5000 }).catch(async () => {
+      const href = String(await signInLink.getAttribute('href').catch(() => '') || '').trim();
+      if (href) {
+        await page.goto(href, { waitUntil: 'domcontentloaded', timeout: timeoutMs }).catch(() => {});
+      }
+    });
+  }
+
+  console.log('检测到需要 Google 登录，请在浏览器中完成 YouTube 登录，完成后程序会自动继续。');
+  const deadline = Date.now() + manualActionTimeoutMs;
+  while (Date.now() < deadline) {
+    if (String(page.url()).includes('youtube.com')) {
+      const state = await detectLoginState(page);
+      if (state === 'signed_in') {
+        return { mode: 'ready' };
+      }
+    }
+    await sleep(1200);
+  }
+
+  return { mode: 'error', error: '等待 Google 账号登录超时' };
 }
 
 function normalizeYoutubeLink(raw) {
@@ -131,9 +219,19 @@ async function main() {
       context = await chromium.launchPersistentContext(profileDir, {
         headless: useHeadless,
         timeout: timeoutMs,
+        ignoreDefaultArgs: ['--enable-automation'],
+        args: ['--disable-blink-features=AutomationControlled'],
         ...(channel ? { channel } : {})
       });
       const page = await context.newPage();
+      const loginState = await ensureGoogleLogin(page, useHeadless);
+      if (loginState.mode === 'human_verification') {
+        return { status: 'human_verification', reason: loginState.reason, results: [], snapshotPath: '' };
+      }
+      if (loginState.mode === 'error') {
+        return { status: 'error', error: loginState.error, results: [], snapshotPath: '' };
+      }
+
       const searchURL = 'https://www.youtube.com/results?search_query=' + encodeURIComponent(query);
       await page.goto(searchURL, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
 
@@ -184,12 +282,24 @@ async function main() {
       process.exitCode = 0;
       return;
     }
+    if (first.status === 'human_verification') {
+      const second = await runAttempt(false);
+      writeResult(second);
+      process.exitCode = second.status === 'ok' ? 0 : 1;
+      return;
+    }
     writeResult(first);
     process.exitCode = 1;
     return;
   }
 
   const final = await runAttempt(headlessMode === 'true');
+  if (final.status === 'human_verification' && final.reason === 'google_login_required') {
+    const second = await runAttempt(false);
+    writeResult(second);
+    process.exitCode = second.status === 'ok' ? 0 : 1;
+    return;
+  }
   writeResult(final);
   process.exitCode = final.status === 'ok' ? 0 : 1;
 }

@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/zhyoulun/agent-web-fetch/src"
-	"github.com/zhyoulun/agent-web-fetch/src/sites"
+	"github.com/zhyoulun/agent-web-fetch/src/sites/search"
 )
 
 type SearchResult struct {
@@ -43,6 +43,7 @@ func main() {
 	query := flag.String("query", "", "搜索关键词")
 	profileDir := flag.String("profile-dir", "./.chrome-profile", "Chrome/Chromium User Data 目录")
 	channel := flag.String("channel", "chrome", "浏览器通道: chrome/chromium/msedge 等")
+	login := flag.Bool("login", false, "允许在浏览器中等待人工完成站点登录；当前主要用于 youtube 的 Google 账号登录")
 	maxResults := flag.Int("max-results", 10, "返回结果数量上限")
 	timeout := flag.Duration("timeout", 90*time.Second, "总超时时间")
 	headless := flag.String("headless", "false", "无头模式: true/false/first")
@@ -85,7 +86,7 @@ func main() {
 		}
 	}
 
-	results, snapshotPath, err := runSearch(engineValue, *query, *profileDir, *channel, *maxResults, *timeout, headlessMode, *snapshot)
+	results, snapshotPath, err := runSearch(engineValue, *query, *profileDir, *channel, *login, *maxResults, *timeout, headlessMode, *snapshot)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "搜索失败: %v\n", err)
 		os.Exit(1)
@@ -113,11 +114,11 @@ func installPlaywrightBrowsers() error {
 	return nil
 }
 
-func runSearch(engine, query, profileDir, channel string, maxResults int, timeout time.Duration, headlessMode string, snapshot bool) ([]SearchResult, string, error) {
+func runSearch(engine, query, profileDir, channel string, login bool, maxResults int, timeout time.Duration, headlessMode string, snapshot bool) ([]SearchResult, string, error) {
 	if err := ensurePlaywrightTestPackage(); err != nil {
 		return nil, "", err
 	}
-	result, err := executePlaywrightScript(engine, query, profileDir, channel, maxResults, timeout, headlessMode, snapshot)
+	result, err := executePlaywrightScript(engine, query, profileDir, channel, login, maxResults, timeout, headlessMode, snapshot)
 	if err != nil {
 		return nil, "", err
 	}
@@ -128,6 +129,9 @@ func runSearch(engine, query, profileDir, channel string, maxResults int, timeou
 		}
 		return result.Results, result.SnapshotPath, nil
 	case ScriptStatusHumanVerification:
+		if strings.TrimSpace(result.Reason) == "google_login_required" {
+			return nil, "", errors.New("需要 Google 账号登录，请使用 --headless false 或 --headless first，并复用同一个 --profile-dir")
+		}
 		return nil, "", errors.New("检测到人机验证，请使用 --headless false 或 --headless first")
 	case ScriptStatusError:
 		msg := strings.TrimSpace(result.Error)
@@ -140,7 +144,7 @@ func runSearch(engine, query, profileDir, channel string, maxResults int, timeou
 	}
 }
 
-func executePlaywrightScript(engine, query, profileDir, channel string, maxResults int, timeout time.Duration, headlessMode string, snapshot bool) (*ScriptResult, error) {
+func executePlaywrightScript(engine, query, profileDir, channel string, login bool, maxResults int, timeout time.Duration, headlessMode string, snapshot bool) (*ScriptResult, error) {
 	absProfileDir, err := filepath.Abs(profileDir)
 	if err != nil {
 		return nil, fmt.Errorf("解析 profile 路径失败: %w", err)
@@ -155,11 +159,12 @@ func executePlaywrightScript(engine, query, profileDir, channel string, maxResul
 	_ = outputFile.Close()
 	defer os.Remove(outputPath)
 
-	scriptContent, err := playwrightFactory.Render(sites.PlaywrightScriptData{
+	scriptContent, err := playwrightFactory.Render(search.PlaywrightScriptData{
 		Engine:        engine,
 		Query:         query,
 		ProfileDir:    absProfileDir,
 		Channel:       strings.TrimSpace(channel),
+		Login:         login,
 		MaxResults:    maxResults,
 		TimeoutMS:     timeout.Milliseconds(),
 		HeadlessMode:  headlessMode,

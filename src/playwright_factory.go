@@ -5,10 +5,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/zhyoulun/agent-web-fetch/src/sites"
+	"github.com/zhyoulun/agent-web-fetch/src/sites/search"
 )
 
-type Renderer func(data sites.PlaywrightScriptData) (string, error)
+type Renderer func(data search.PlaywrightScriptData) (string, error)
 
 type PlaywrightFactory struct {
 	renderers map[string]Renderer
@@ -17,20 +17,20 @@ type PlaywrightFactory struct {
 func NewPlaywrightFactory() *PlaywrightFactory {
 	return &PlaywrightFactory{
 		renderers: map[string]Renderer{
-			"amazon":     sites.RenderAmazonPlaywrightScript,
-			"baidu":      sites.RenderBaiduPlaywrightScript,
-			"bing":       sites.RenderBingPlaywrightScript,
-			"duckduckgo": sites.RenderDuckDuckGoPlaywrightScript,
-			"google":     sites.RenderGooglePlaywrightScript,
-			"reddit":     sites.RenderRedditPlaywrightScript,
-			"tiktok":     sites.RenderTikTokPlaywrightScript,
-			"wikipedia":  sites.RenderWikipediaPlaywrightScript,
-			"youtube":    sites.RenderYouTubePlaywrightScript,
+			"amazon":     search.RenderAmazonPlaywrightScript,
+			"baidu":      search.RenderBaiduPlaywrightScript,
+			"bing":       search.RenderBingPlaywrightScript,
+			"duckduckgo": search.RenderDuckDuckGoPlaywrightScript,
+			"google":     search.RenderGooglePlaywrightScript,
+			"reddit":     search.RenderRedditPlaywrightScript,
+			"tiktok":     search.RenderTikTokPlaywrightScript,
+			"wikipedia":  search.RenderWikipediaPlaywrightScript,
+			"youtube":    search.RenderYouTubePlaywrightScript,
 		},
 	}
 }
 
-func (f *PlaywrightFactory) Render(data sites.PlaywrightScriptData) (string, error) {
+func (f *PlaywrightFactory) Render(data search.PlaywrightScriptData) (string, error) {
 	engine := strings.ToLower(strings.TrimSpace(data.Engine))
 	renderer, ok := f.renderers[engine]
 	if !ok {

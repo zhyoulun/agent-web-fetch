@@ -81,6 +81,8 @@ async function runAttempt(useHeadless) {
     context = await chromium.launchPersistentContext(profileDir, {
       headless: useHeadless,
       timeout: timeoutMs,
+      ignoreDefaultArgs: ['--enable-automation'],
+      args: ['--disable-blink-features=AutomationControlled'],
       userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
       viewport: { width: 1440, height: 1600 },
       locale: 'zh-CN',

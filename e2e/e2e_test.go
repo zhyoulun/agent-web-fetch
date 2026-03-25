@@ -85,6 +85,8 @@ async function launchContext(profileDir, headless) {
   return await chromium.launchPersistentContext(profileDir, {
     channel: 'chrome',
     headless,
+    ignoreDefaultArgs: ['--enable-automation'],
+    args: ['--disable-blink-features=AutomationControlled'],
     userAgent:
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     viewport: { width: 1440, height: 1600 },

@@ -227,6 +227,8 @@ async function main() {
       context = await chromium.launchPersistentContext(profileDir, {
         headless: useHeadless,
         timeout: timeoutMs,
+        ignoreDefaultArgs: ['--enable-automation'],
+        args: ['--disable-blink-features=AutomationControlled'],
         ...(channel ? { channel } : {})
       });
       const page = await context.newPage();
