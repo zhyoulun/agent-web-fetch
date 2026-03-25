@@ -1,0 +1,222 @@
+const { chromium } = require('@playwright/test');
+const fs = require('fs');
+const path = require('path');
+
+const query = {{ js .Query }};
+const profileDir = {{ js .ProfileDir }};
+const channel = {{ js .Channel }};
+const timeoutMs = {{ .TimeoutMS }};
+const headlessMode = {{ js .HeadlessMode }};
+const snapshot = {{ if .Snapshot }}true{{ else }}false{{ end }};
+const snapshotStamp = {{ js .SnapshotStamp }};
+const projectRoot = {{ js .ProjectRoot }};
+const outputJSON = {{ js .OutputPath }};
+const manualActionTimeoutMs = Math.min(timeoutMs, 10 * 60 * 1000);
+
+function writeResult(data) {
+  fs.writeFileSync(outputJSON, JSON.stringify(data), 'utf8');
+}
+
+function finish(data) {
+  writeResult(data);
+  process.exit(data.status === 'ok' ? 0 : 1);
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function normalizeText(raw) {
+  return String(raw || '').replace(/\s+/g, ' ').trim();
+}
+
+function sanitizeFileName(input) {
+  const source = String(input || '').trim();
+  if (!source) return 'untitled';
+  const safe = source.replace(/[^a-zA-Z0-9\-_ ]+/g, '').replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^[-_]+|[-_]+$/g, '');
+  return safe ? safe.slice(0, 48) : 'untitled';
+}
+
+async function closeContext(context) {
+  if (!context) return;
+  await Promise.race([context.close(), sleep(2000)]).catch(() => {});
+}
+
+async function launchContext(useHeadless) {
+  return await chromium.launchPersistentContext(profileDir, {
+    headless: false,
+    timeout: timeoutMs,
+    ignoreDefaultArgs: ['--enable-automation'],
+    args: ['--disable-blink-features=AutomationControlled'],
+    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    viewport: { width: 1440, height: 1200 },
+    locale: 'en-US',
+    ...(channel ? { channel } : {})
+  });
+}
+
+async function isLoggedIn(page) {
+  return await page.locator('button[data-testid="login-button"], button:has-text("Log in")').count().catch(() => 0) === 0;
+}
+
+async function hasPromptInput(page) {
+  const input = page.locator('div#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, textarea[data-testid="prompt-textarea"]').first();
+  return await input.isVisible({ timeout: 1000 }).catch(() => false);
+}
+
+async function readBodyText(page) {
+  return normalizeText(await page.locator('body').innerText({ timeout: 1000 }).catch(() => ''));
+}
+
+async function detectBlockingState(page) {
+  const title = normalizeText(await page.title().catch(() => ''));
+  const url = String(page.url() || '');
+  const bodyText = await readBodyText(page);
+
+  if (/just a moment/i.test(title) || url.includes('/cdn-cgi/challenge-platform') || bodyText.includes('Verify you are human') || bodyText.includes('Checking your browser')) {
+    return 'human_verification';
+  }
+  if (!await isLoggedIn(page)) {
+    return 'login_required';
+  }
+  return '';
+}
+
+async function ensureChatGPTReady(page, useHeadless) {
+  await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: timeoutMs }).catch(() => {});
+  await page.waitForTimeout(1500);
+  if (await hasPromptInput(page)) {
+    return { mode: 'ready' };
+  }
+
+  const blockingState = await detectBlockingState(page);
+  if (blockingState === 'human_verification') {
+    if (useHeadless) {
+      return { mode: 'human_verification', reason: 'chatgpt_human_verification_required' };
+    }
+    console.log('检测到 ChatGPT 安全校验，请在浏览器中完成人机验证，完成后程序会自动继续。');
+  } else if (blockingState === 'login_required') {
+    if (useHeadless) {
+      return { mode: 'human_verification', reason: 'chatgpt_login_required' };
+    }
+    console.log('检测到需要登录 ChatGPT，请在浏览器中完成登录，完成后程序会自动继续。');
+  } else if (useHeadless) {
+    return { mode: 'error', error: '已进入 ChatGPT，但未找到可用输入框，页面结构可能已变更' };
+  }
+
+  const loginButton = page.locator('button[data-testid="login-button"], button:has-text("Log in")').last();
+  if (await loginButton.count().catch(() => 0) > 0) {
+    await loginButton.click({ timeout: 5000 }).catch(() => {});
+  }
+  const deadline = Date.now() + manualActionTimeoutMs;
+  while (Date.now() < deadline) {
+    if (String(page.url()).includes('chatgpt.com') && await hasPromptInput(page)) {
+      return { mode: 'ready' };
+    }
+    await sleep(1200);
+  }
+
+  if (blockingState === 'human_verification') {
+    return { mode: 'error', error: '等待 ChatGPT 人机验证超时' };
+  }
+  if (blockingState === 'login_required') {
+    return { mode: 'error', error: '等待 ChatGPT 登录超时' };
+  }
+  return { mode: 'error', error: '等待 ChatGPT 输入框就绪超时' };
+}
+
+async function submitQuestion(page) {
+  console.log('正在打开 ChatGPT 页面...');
+  await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+  const input = page.locator('div#prompt-textarea[contenteditable="true"], textarea#prompt-textarea, textarea[data-testid="prompt-textarea"]').first();
+  await input.waitFor({ state: 'visible', timeout: timeoutMs });
+  console.log('已找到输入框，正在提交问题...');
+  await input.click({ timeout: 5000 });
+  await input.fill(query);
+  await page.keyboard.press('Enter');
+}
+
+async function readLatestAnswer(page) {
+  return await page.evaluate(() => {
+    const messages = Array.from(document.querySelectorAll('main [data-message-author-role="assistant"]'));
+    if (!messages.length) return '';
+    const last = messages[messages.length - 1];
+    return String(last.textContent || '').replace(/\s+/g, ' ').trim();
+  }).catch(() => '');
+}
+
+async function waitForAnswer(page) {
+  console.log('问题已提交，正在等待 ChatGPT 回答...');
+  const deadline = Date.now() + timeoutMs;
+  let previous = '';
+  let stableCount = 0;
+  while (Date.now() < deadline) {
+    const answer = normalizeText(await readLatestAnswer(page));
+    if (answer) {
+      if (answer === previous) {
+        stableCount += 1;
+      } else {
+        previous = answer;
+        stableCount = 1;
+      }
+      if (stableCount >= 2) {
+        return answer;
+      }
+    }
+    await sleep(1200);
+  }
+  return '';
+}
+
+async function runAttempt(useHeadless) {
+  let context;
+  try {
+    context = await launchContext(useHeadless);
+    const page = await context.newPage();
+
+    console.log('正在以可见模式启动 ChatGPT...');
+    const loginState = await ensureChatGPTReady(page, false);
+    if (loginState.mode === 'human_verification') {
+      return { status: 'human_verification', reason: loginState.reason, results: [], snapshotPath: '' };
+    }
+    if (loginState.mode === 'error') {
+      return { status: 'error', error: loginState.error, results: [], snapshotPath: '' };
+    }
+
+    await submitQuestion(page);
+    const answer = await waitForAnswer(page);
+    if (!answer) {
+      return { status: 'error', error: '等待 ChatGPT 回答超时', results: [], snapshotPath: '' };
+    }
+
+    let snapshotPath = '';
+    if (snapshot) {
+      await page.waitForTimeout(900);
+      const snapshotDir = path.join(projectRoot, 'snapshots', snapshotStamp);
+      fs.mkdirSync(snapshotDir, { recursive: true });
+      const filePath = path.join(snapshotDir, 'chatgpt-' + sanitizeFileName(query) + '.png');
+      await page.screenshot({ path: filePath, fullPage: true, timeout: 15000 });
+      snapshotPath = path.resolve(filePath);
+    }
+
+    return {
+      status: 'ok',
+      results: [{ title: answer, url: page.url() }],
+      snapshotPath
+    };
+  } catch (error) {
+    return { status: 'error', error: String(error && error.message ? error.message : error), results: [], snapshotPath: '' };
+  } finally {
+    await closeContext(context);
+  }
+}
+
+async function main() {
+  if (!['true', 'false', 'first'].includes(headlessMode)) {
+    finish({ status: 'error', error: '不支持的 headless 模式', results: [], snapshotPath: '' });
+  }
+
+  finish(await runAttempt(false));
+}
+
+main();

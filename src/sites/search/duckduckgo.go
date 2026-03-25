@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strconv"
 	"text/template"
+
+	"github.com/zhyoulun/agent-web-fetch/src/sites"
 )
 
 //go:embed scripts/duckduckgo.playwright.js.tmpl
@@ -17,7 +19,7 @@ var duckDuckGoPlaywrightScriptParser = template.Must(template.New("duckduckgo-pl
 	},
 }).Parse(duckDuckGoPlaywrightScriptTemplate))
 
-func RenderDuckDuckGoPlaywrightScript(data PlaywrightScriptData) (string, error) {
+func RenderDuckDuckGoPlaywrightScript(data sites.PlaywrightScriptData) (string, error) {
 	var buf bytes.Buffer
 	if err := duckDuckGoPlaywrightScriptParser.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("渲染 duckduckgo 脚本模板失败: %w", err)

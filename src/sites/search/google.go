@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strconv"
 	"text/template"
+
+	"github.com/zhyoulun/agent-web-fetch/src/sites"
 )
 
 //go:embed scripts/google.playwright.js.tmpl
@@ -17,7 +19,7 @@ var googlePlaywrightScriptParser = template.Must(template.New("google-playwright
 	},
 }).Parse(googlePlaywrightScriptTemplate))
 
-func RenderGooglePlaywrightScript(data PlaywrightScriptData) (string, error) {
+func RenderGooglePlaywrightScript(data sites.PlaywrightScriptData) (string, error) {
 	var buf bytes.Buffer
 	if err := googlePlaywrightScriptParser.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("渲染 google 脚本模板失败: %w", err)

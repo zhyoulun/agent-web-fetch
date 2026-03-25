@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strconv"
 	"text/template"
+
+	"github.com/zhyoulun/agent-web-fetch/src/sites"
 )
 
 //go:embed scripts/bing.playwright.js.tmpl
@@ -17,7 +19,7 @@ var bingPlaywrightScriptParser = template.Must(template.New("bing-playwright-scr
 	},
 }).Parse(bingPlaywrightScriptTemplate))
 
-func RenderBingPlaywrightScript(data PlaywrightScriptData) (string, error) {
+func RenderBingPlaywrightScript(data sites.PlaywrightScriptData) (string, error) {
 	var buf bytes.Buffer
 	if err := bingPlaywrightScriptParser.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("渲染 bing 脚本模板失败: %w", err)

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strconv"
 	"text/template"
+
+	"github.com/zhyoulun/agent-web-fetch/src/sites"
 )
 
 //go:embed scripts/youtube.playwright.js.tmpl
@@ -17,7 +19,7 @@ var youtubePlaywrightScriptParser = template.Must(template.New("youtube-playwrig
 	},
 }).Parse(youtubePlaywrightScriptTemplate))
 
-func RenderYouTubePlaywrightScript(data PlaywrightScriptData) (string, error) {
+func RenderYouTubePlaywrightScript(data sites.PlaywrightScriptData) (string, error) {
 	var buf bytes.Buffer
 	if err := youtubePlaywrightScriptParser.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("渲染 youtube 脚本模板失败: %w", err)

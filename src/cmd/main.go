@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,7 +14,7 @@ import (
 	"time"
 
 	"github.com/zhyoulun/agent-web-fetch/src"
-	"github.com/zhyoulun/agent-web-fetch/src/sites/search"
+	"github.com/zhyoulun/agent-web-fetch/src/sites"
 )
 
 type SearchResult struct {
@@ -39,8 +41,8 @@ type ScriptResult struct {
 var playwrightFactory = src.NewPlaywrightFactory()
 
 func main() {
-	engine := flag.String("engine", "google", "搜索引擎: google/youtube/wikipedia/amazon/reddit/bing/duckduckgo/baidu/tiktok")
-	query := flag.String("query", "", "搜索关键词")
+	engine := flag.String("engine", "google", "搜索引擎: google/youtube/wikipedia/amazon/reddit/bing/duckduckgo/baidu/tiktok/chatgpt/grok/gemini")
+	query := flag.String("query", "", "搜索关键词或问题")
 	profileDir := flag.String("profile-dir", "./.chrome-profile", "Chrome/Chromium User Data 目录")
 	channel := flag.String("channel", "chrome", "浏览器通道: chrome/chromium/msedge 等")
 	login := flag.Bool("login", false, "允许在浏览器中等待人工完成站点登录；当前主要用于 youtube 的 Google 账号登录")
@@ -57,7 +59,7 @@ func main() {
 	}
 	engineValue := strings.ToLower(strings.TrimSpace(*engine))
 	if !playwrightFactory.Supports(engineValue) {
-		fmt.Fprintln(os.Stderr, "参数错误: --engine 仅支持 google/youtube/wikipedia/amazon/reddit/bing/duckduckgo/baidu/tiktok")
+		fmt.Fprintln(os.Stderr, "参数错误: --engine 仅支持 google/youtube/wikipedia/amazon/reddit/bing/duckduckgo/baidu/tiktok/chatgpt/grok/gemini")
 		os.Exit(2)
 	}
 	if *maxResults <= 0 {
@@ -129,8 +131,16 @@ func runSearch(engine, query, profileDir, channel string, login bool, maxResults
 		}
 		return result.Results, result.SnapshotPath, nil
 	case ScriptStatusHumanVerification:
-		if strings.TrimSpace(result.Reason) == "google_login_required" {
-			return nil, "", errors.New("需要 Google 账号登录，请使用 --headless false 或 --headless first，并复用同一个 --profile-dir")
+		reason := strings.TrimSpace(result.Reason)
+		if strings.HasSuffix(reason, "_login_required") {
+			target := "目标站点"
+			switch reason {
+			case "google_login_required":
+				target = "Google 账号"
+			case "chatgpt_login_required":
+				target = "ChatGPT"
+			}
+			return nil, "", fmt.Errorf("需要先登录%s，请使用 --headless false 或 --headless first，并复用同一个 --profile-dir", target)
 		}
 		return nil, "", errors.New("检测到人机验证，请使用 --headless false 或 --headless first")
 	case ScriptStatusError:
@@ -159,7 +169,7 @@ func executePlaywrightScript(engine, query, profileDir, channel string, login bo
 	_ = outputFile.Close()
 	defer os.Remove(outputPath)
 
-	scriptContent, err := playwrightFactory.Render(search.PlaywrightScriptData{
+	scriptContent, err := playwrightFactory.Render(sites.PlaywrightScriptData{
 		Engine:        engine,
 		Query:         query,
 		ProfileDir:    absProfileDir,
@@ -201,12 +211,17 @@ func executePlaywrightScript(engine, query, profileDir, channel string, login bo
 	cmd := exec.Command("node", scriptPath)
 	cmd.Dir = projectRoot
 	cmd.Env = os.Environ()
-	commandOutput, cmdErr := cmd.CombinedOutput()
+	var commandOutput bytes.Buffer
+	cmd.Stdout = io.MultiWriter(os.Stderr, &commandOutput)
+	cmd.Stderr = io.MultiWriter(os.Stderr, &commandOutput)
+
+	fmt.Fprintf(os.Stderr, "[%s] 正在启动 Playwright 脚本...\n", engine)
+	cmdErr := cmd.Run()
 
 	payloadBytes, readErr := os.ReadFile(outputPath)
 	if readErr != nil {
 		if cmdErr != nil {
-			return nil, fmt.Errorf("执行 playwright 命令失败: %w\n%s", cmdErr, strings.TrimSpace(string(commandOutput)))
+			return nil, fmt.Errorf("执行 playwright 命令失败: %w\n%s", cmdErr, strings.TrimSpace(commandOutput.String()))
 		}
 		return nil, fmt.Errorf("读取脚本输出失败: %w", readErr)
 	}
@@ -217,7 +232,7 @@ func executePlaywrightScript(engine, query, profileDir, channel string, login bo
 	}
 
 	if cmdErr != nil && strings.TrimSpace(string(result.Status)) == "" {
-		return nil, fmt.Errorf("执行 playwright 命令失败: %w\n%s", cmdErr, strings.TrimSpace(string(commandOutput)))
+		return nil, fmt.Errorf("执行 playwright 命令失败: %w\n%s", cmdErr, strings.TrimSpace(commandOutput.String()))
 	}
 	return &result, nil
 }

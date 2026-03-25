@@ -1,4 +1,4 @@
-package search
+package sites
 
 type PlaywrightScriptData struct {
 	Engine        string

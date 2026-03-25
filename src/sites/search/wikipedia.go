@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strconv"
 	"text/template"
+
+	"github.com/zhyoulun/agent-web-fetch/src/sites"
 )
 
 //go:embed scripts/wikipedia.playwright.js.tmpl
@@ -17,7 +19,7 @@ var wikipediaPlaywrightScriptParser = template.Must(template.New("wikipedia-play
 	},
 }).Parse(wikipediaPlaywrightScriptTemplate))
 
-func RenderWikipediaPlaywrightScript(data PlaywrightScriptData) (string, error) {
+func RenderWikipediaPlaywrightScript(data sites.PlaywrightScriptData) (string, error) {
 	var buf bytes.Buffer
 	if err := wikipediaPlaywrightScriptParser.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("渲染 wikipedia 脚本模板失败: %w", err)

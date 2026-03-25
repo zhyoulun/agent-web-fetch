@@ -1,0 +1,208 @@
+const { chromium } = require('@playwright/test');
+const fs = require('fs');
+const path = require('path');
+
+const query = {{ js .Query }};
+const profileDir = {{ js .ProfileDir }};
+const channel = {{ js .Channel }};
+const loginRequested = {{ if .Login }}true{{ else }}false{{ end }};
+const timeoutMs = {{ .TimeoutMS }};
+const headlessMode = {{ js .HeadlessMode }};
+const snapshot = {{ if .Snapshot }}true{{ else }}false{{ end }};
+const snapshotStamp = {{ js .SnapshotStamp }};
+const projectRoot = {{ js .ProjectRoot }};
+const outputJSON = {{ js .OutputPath }};
+const manualActionTimeoutMs = Math.min(timeoutMs, 10 * 60 * 1000);
+
+function writeResult(data) {
+  fs.writeFileSync(outputJSON, JSON.stringify(data), 'utf8');
+}
+
+function finish(data) {
+  writeResult(data);
+  process.exit(data.status === 'ok' ? 0 : 1);
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function normalizeText(raw) {
+  return String(raw || '').replace(/\s+/g, ' ').trim();
+}
+
+function sanitizeFileName(input) {
+  const source = String(input || '').trim();
+  if (!source) return 'untitled';
+  const safe = source.replace(/[^a-zA-Z0-9\-_ ]+/g, '').replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^[-_]+|[-_]+$/g, '');
+  return safe ? safe.slice(0, 48) : 'untitled';
+}
+
+async function closeContext(context) {
+  if (!context) return;
+  await Promise.race([context.close(), sleep(2000)]).catch(() => {});
+}
+
+async function launchContext(useHeadless) {
+  return await chromium.launchPersistentContext(profileDir, {
+    headless: useHeadless,
+    timeout: timeoutMs,
+    ignoreDefaultArgs: ['--enable-automation'],
+    args: ['--disable-blink-features=AutomationControlled'],
+    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    viewport: { width: 1440, height: 1200 },
+    locale: 'en-US',
+    ...(channel ? { channel } : {})
+  });
+}
+
+async function isLoggedIn(page) {
+  return await page.locator('a[href="/sign-in"], a:has-text("Sign in"), a[href*="accounts.x.ai/sign-in"]').count().catch(() => 0) === 0;
+}
+
+async function ensureGoogleLogin(page, useHeadless) {
+  if (!loginRequested) {
+    return { mode: 'ready' };
+  }
+
+  if (useHeadless) {
+    return { mode: 'human_verification', reason: 'google_login_required' };
+  }
+
+  await page.goto('https://grok.com/', { waitUntil: 'domcontentloaded', timeout: timeoutMs }).catch(() => {});
+  await page.waitForTimeout(1500);
+  if (await isLoggedIn(page)) {
+    return { mode: 'ready' };
+  }
+
+  const signInLink = page.locator('a[href="/sign-in"], a:has-text("Sign in")').first();
+  if (await signInLink.count().catch(() => 0) > 0) {
+    await signInLink.click({ timeout: 5000 }).catch(async () => {
+      const href = String(await signInLink.getAttribute('href').catch(() => '') || '').trim();
+      if (href) {
+        await page.goto(href, { waitUntil: 'domcontentloaded', timeout: timeoutMs }).catch(() => {});
+      }
+    });
+  }
+  await page.waitForTimeout(1000);
+
+  const googleButton = page.locator('button:has-text("Login with Google")').first();
+  if (await googleButton.count().catch(() => 0) > 0) {
+    await googleButton.click({ timeout: 5000 }).catch(() => {});
+  }
+
+  console.log('检测到需要 Google 登录，请在浏览器中完成 Grok 登录，完成后程序会自动继续。');
+  const deadline = Date.now() + manualActionTimeoutMs;
+  while (Date.now() < deadline) {
+    if (String(page.url()).includes('grok.com') && await isLoggedIn(page)) {
+      return { mode: 'ready' };
+    }
+    await sleep(1200);
+  }
+  return { mode: 'error', error: '等待 Google 账号登录超时' };
+}
+
+async function submitQuestion(page) {
+  await page.goto('https://grok.com/', { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+  const input = page.locator('textarea[aria-label="Ask Grok anything"], textarea[placeholder*="How can I help"]').first();
+  await input.waitFor({ state: 'visible', timeout: timeoutMs });
+  await input.fill(query);
+  await page.locator('button[aria-label="Submit"]').click({ timeout: 5000 });
+}
+
+async function readLatestAnswer(page) {
+  return await page.evaluate(() => {
+    const nodes = Array.from(document.querySelectorAll('div[id^="response-"]')).filter(node => node.classList.contains('items-start'));
+    if (!nodes.length) return '';
+    const last = nodes[nodes.length - 1];
+    const content = last.querySelector('.response-content-markdown') || last.querySelector('.message-bubble');
+    return String(content && content.textContent ? content.textContent : '').replace(/\s+/g, ' ').trim();
+  }).catch(() => '');
+}
+
+async function waitForAnswer(page) {
+  const deadline = Date.now() + timeoutMs;
+  let previous = '';
+  let stableCount = 0;
+  while (Date.now() < deadline) {
+    const answer = normalizeText(await readLatestAnswer(page));
+    if (answer) {
+      if (answer === previous) {
+        stableCount += 1;
+      } else {
+        previous = answer;
+        stableCount = 1;
+      }
+      if (stableCount >= 2) {
+        return answer;
+      }
+    }
+    await sleep(1200);
+  }
+  return '';
+}
+
+async function runAttempt(useHeadless) {
+  let context;
+  try {
+    context = await launchContext(useHeadless);
+    const page = await context.newPage();
+
+    const loginState = await ensureGoogleLogin(page, useHeadless);
+    if (loginState.mode === 'human_verification') {
+      return { status: 'human_verification', reason: loginState.reason, results: [], snapshotPath: '' };
+    }
+    if (loginState.mode === 'error') {
+      return { status: 'error', error: loginState.error, results: [], snapshotPath: '' };
+    }
+
+    await submitQuestion(page);
+    const answer = await waitForAnswer(page);
+    if (!answer) {
+      return { status: 'error', error: '等待 Grok 回答超时', results: [], snapshotPath: '' };
+    }
+
+    let snapshotPath = '';
+    if (snapshot) {
+      await page.waitForTimeout(900);
+      const snapshotDir = path.join(projectRoot, 'snapshots', snapshotStamp);
+      fs.mkdirSync(snapshotDir, { recursive: true });
+      const filePath = path.join(snapshotDir, 'grok-' + sanitizeFileName(query) + '.png');
+      await page.screenshot({ path: filePath, fullPage: true, timeout: 15000 });
+      snapshotPath = path.resolve(filePath);
+    }
+
+    return {
+      status: 'ok',
+      results: [{ title: answer, url: page.url() }],
+      snapshotPath
+    };
+  } catch (error) {
+    return { status: 'error', error: String(error && error.message ? error.message : error), results: [], snapshotPath: '' };
+  } finally {
+    await closeContext(context);
+  }
+}
+
+async function main() {
+  if (!['true', 'false', 'first'].includes(headlessMode)) {
+    finish({ status: 'error', error: '不支持的 headless 模式', results: [], snapshotPath: '' });
+  }
+
+  if (headlessMode === 'first') {
+    const first = await runAttempt(true);
+    if (first.status === 'ok') finish(first);
+    if (first.status === 'human_verification' && first.reason === 'google_login_required') {
+      finish(await runAttempt(false));
+    }
+    finish(first);
+  }
+
+  const final = await runAttempt(headlessMode === 'true');
+  if (final.status === 'human_verification' && final.reason === 'google_login_required') {
+    finish(await runAttempt(false));
+  }
+  finish(final);
+}
+
+main();

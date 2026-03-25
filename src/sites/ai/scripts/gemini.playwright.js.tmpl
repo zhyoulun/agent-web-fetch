@@ -1,0 +1,208 @@
+const { chromium } = require('@playwright/test');
+const fs = require('fs');
+const path = require('path');
+
+const query = {{ js .Query }};
+const profileDir = {{ js .ProfileDir }};
+const channel = {{ js .Channel }};
+const loginRequested = {{ if .Login }}true{{ else }}false{{ end }};
+const timeoutMs = {{ .TimeoutMS }};
+const headlessMode = {{ js .HeadlessMode }};
+const snapshot = {{ if .Snapshot }}true{{ else }}false{{ end }};
+const snapshotStamp = {{ js .SnapshotStamp }};
+const projectRoot = {{ js .ProjectRoot }};
+const outputJSON = {{ js .OutputPath }};
+const manualActionTimeoutMs = Math.min(timeoutMs, 10 * 60 * 1000);
+
+function writeResult(data) {
+  fs.writeFileSync(outputJSON, JSON.stringify(data), 'utf8');
+}
+
+function finish(data) {
+  writeResult(data);
+  process.exit(data.status === 'ok' ? 0 : 1);
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function normalizeText(raw) {
+  return String(raw || '').replace(/\s+/g, ' ').trim();
+}
+
+function sanitizeFileName(input) {
+  const source = String(input || '').trim();
+  if (!source) return 'untitled';
+  const safe = source.replace(/[^a-zA-Z0-9\-_ ]+/g, '').replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^[-_]+|[-_]+$/g, '');
+  return safe ? safe.slice(0, 48) : 'untitled';
+}
+
+async function closeContext(context) {
+  if (!context) return;
+  await Promise.race([context.close(), sleep(2000)]).catch(() => {});
+}
+
+async function launchContext(useHeadless) {
+  return await chromium.launchPersistentContext(profileDir, {
+    headless: false,
+    timeout: timeoutMs,
+    ignoreDefaultArgs: ['--enable-automation'],
+    args: ['--disable-blink-features=AutomationControlled'],
+    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    viewport: { width: 1440, height: 1200 },
+    locale: 'en-US',
+    ...(channel ? { channel } : {})
+  });
+}
+
+async function isLoggedIn(page) {
+  return await page.locator('a[href*="accounts.google.com/ServiceLogin"], a[aria-label="Sign in"], button:has-text("Sign in")').count().catch(() => 0) === 0;
+}
+
+async function waitForLoginState(page, timeout) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (await isLoggedIn(page)) {
+      return true;
+    }
+    const bodyText = String(await page.locator('body').innerText({ timeout: 1000 }).catch(() => '') || '');
+    if (bodyText.includes('\nSign in\n')) {
+      return false;
+    }
+    await sleep(400);
+  }
+  return await isLoggedIn(page);
+}
+
+async function ensureGoogleLogin(page, useHeadless) {
+  if (!loginRequested) {
+    return { mode: 'ready' };
+  }
+
+  if (useHeadless) {
+    return { mode: 'human_verification', reason: 'google_login_required' };
+  }
+
+  await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded', timeout: timeoutMs }).catch(() => {});
+  await page.waitForTimeout(1500);
+  if (await waitForLoginState(page, 5000)) {
+    return { mode: 'ready' };
+  }
+
+  const signInLink = page.locator('a[href*="accounts.google.com/ServiceLogin"], a[aria-label="Sign in"], button:has-text("Sign in")').first();
+  if (await signInLink.count().catch(() => 0) > 0) {
+    const href = String(await signInLink.getAttribute('href').catch(() => '') || '').trim();
+    if (href) {
+      await page.goto(href, { waitUntil: 'domcontentloaded', timeout: timeoutMs }).catch(() => {});
+    } else {
+      await signInLink.click({ timeout: 5000 }).catch(() => {});
+    }
+  }
+
+  console.log('检测到需要 Google 登录，请在浏览器中完成 Gemini 登录，完成后程序会自动继续。');
+  const deadline = Date.now() + manualActionTimeoutMs;
+  while (Date.now() < deadline) {
+    const currentURL = String(page.url());
+    if (!currentURL.includes('accounts.google.com') && currentURL.includes('gemini.google.com') && await isLoggedIn(page)) {
+      return { mode: 'ready' };
+    }
+    await sleep(1200);
+  }
+  return { mode: 'error', error: '等待 Google 账号登录超时' };
+}
+
+async function submitQuestion(page) {
+  await page.goto('https://gemini.google.com/app', { waitUntil: 'domcontentloaded', timeout: timeoutMs }).catch(() => {});
+  const input = page.locator('[contenteditable="true"][aria-label*="Enter a prompt"]').first();
+  await input.waitFor({ state: 'visible', timeout: timeoutMs });
+  await input.click({ timeout: 5000 });
+  await page.keyboard.type(query);
+  await page.locator('button[aria-label="Send message"]').click({ timeout: 5000 }).catch(async () => {
+    await page.keyboard.press('Enter').catch(() => {});
+  });
+}
+
+async function readLatestAnswer(page) {
+  return await page.evaluate(() => {
+    const answers = Array.from(document.querySelectorAll('div[id^="model-response-message-content"], message-content .markdown-main-panel'));
+    if (!answers.length) return '';
+    const last = answers[answers.length - 1];
+    return String(last.textContent || '').replace(/\s+/g, ' ').trim();
+  }).catch(() => '');
+}
+
+async function waitForAnswer(page) {
+  const deadline = Date.now() + timeoutMs;
+  let previous = '';
+  let stableCount = 0;
+  while (Date.now() < deadline) {
+    const answer = normalizeText(await readLatestAnswer(page));
+    if (answer) {
+      if (answer === previous) {
+        stableCount += 1;
+      } else {
+        previous = answer;
+        stableCount = 1;
+      }
+      if (stableCount >= 2) {
+        return answer;
+      }
+    }
+    await sleep(1200);
+  }
+  return '';
+}
+
+async function runAttempt(useHeadless) {
+  let context;
+  try {
+    context = await launchContext(useHeadless);
+    const page = await context.newPage();
+
+    console.log('正在以可见模式启动 Gemini...');
+    const loginState = await ensureGoogleLogin(page, false);
+    if (loginState.mode === 'human_verification') {
+      return { status: 'human_verification', reason: loginState.reason, results: [], snapshotPath: '' };
+    }
+    if (loginState.mode === 'error') {
+      return { status: 'error', error: loginState.error, results: [], snapshotPath: '' };
+    }
+
+    await submitQuestion(page);
+    const answer = await waitForAnswer(page);
+    if (!answer) {
+      return { status: 'error', error: '等待 Gemini 回答超时', results: [], snapshotPath: '' };
+    }
+
+    let snapshotPath = '';
+    if (snapshot) {
+      await page.waitForTimeout(900);
+      const snapshotDir = path.join(projectRoot, 'snapshots', snapshotStamp);
+      fs.mkdirSync(snapshotDir, { recursive: true });
+      const filePath = path.join(snapshotDir, 'gemini-' + sanitizeFileName(query) + '.png');
+      await page.screenshot({ path: filePath, fullPage: true, timeout: 15000 });
+      snapshotPath = path.resolve(filePath);
+    }
+
+    return {
+      status: 'ok',
+      results: [{ title: answer, url: page.url() }],
+      snapshotPath
+    };
+  } catch (error) {
+    return { status: 'error', error: String(error && error.message ? error.message : error), results: [], snapshotPath: '' };
+  } finally {
+    await closeContext(context);
+  }
+}
+
+async function main() {
+  if (!['true', 'false', 'first'].includes(headlessMode)) {
+    finish({ status: 'error', error: '不支持的 headless 模式', results: [], snapshotPath: '' });
+  }
+
+  finish(await runAttempt(false));
+}
+
+main();

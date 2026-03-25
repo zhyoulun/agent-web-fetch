@@ -5,10 +5,12 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/zhyoulun/agent-web-fetch/src/sites"
+	"github.com/zhyoulun/agent-web-fetch/src/sites/ai"
 	"github.com/zhyoulun/agent-web-fetch/src/sites/search"
 )
 
-type Renderer func(data search.PlaywrightScriptData) (string, error)
+type Renderer func(data sites.PlaywrightScriptData) (string, error)
 
 type PlaywrightFactory struct {
 	renderers map[string]Renderer
@@ -20,8 +22,11 @@ func NewPlaywrightFactory() *PlaywrightFactory {
 			"amazon":     search.RenderAmazonPlaywrightScript,
 			"baidu":      search.RenderBaiduPlaywrightScript,
 			"bing":       search.RenderBingPlaywrightScript,
+			"chatgpt":    ai.RenderChatGPTPlaywrightScript,
 			"duckduckgo": search.RenderDuckDuckGoPlaywrightScript,
+			"gemini":     ai.RenderGeminiPlaywrightScript,
 			"google":     search.RenderGooglePlaywrightScript,
+			"grok":       ai.RenderGrokPlaywrightScript,
 			"reddit":     search.RenderRedditPlaywrightScript,
 			"tiktok":     search.RenderTikTokPlaywrightScript,
 			"wikipedia":  search.RenderWikipediaPlaywrightScript,
@@ -30,7 +35,7 @@ func NewPlaywrightFactory() *PlaywrightFactory {
 	}
 }
 
-func (f *PlaywrightFactory) Render(data search.PlaywrightScriptData) (string, error) {
+func (f *PlaywrightFactory) Render(data sites.PlaywrightScriptData) (string, error) {
 	engine := strings.ToLower(strings.TrimSpace(data.Engine))
 	renderer, ok := f.renderers[engine]
 	if !ok {

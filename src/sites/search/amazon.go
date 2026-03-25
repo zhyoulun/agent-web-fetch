@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strconv"
 	"text/template"
+
+	"github.com/zhyoulun/agent-web-fetch/src/sites"
 )
 
 //go:embed scripts/amazon.playwright.js.tmpl
@@ -17,7 +19,7 @@ var amazonPlaywrightScriptParser = template.Must(template.New("amazon-playwright
 	},
 }).Parse(amazonPlaywrightScriptTemplate))
 
-func RenderAmazonPlaywrightScript(data PlaywrightScriptData) (string, error) {
+func RenderAmazonPlaywrightScript(data sites.PlaywrightScriptData) (string, error) {
 	var buf bytes.Buffer
 	if err := amazonPlaywrightScriptParser.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("渲染 amazon 脚本模板失败: %w", err)

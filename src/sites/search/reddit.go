@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strconv"
 	"text/template"
+
+	"github.com/zhyoulun/agent-web-fetch/src/sites"
 )
 
 //go:embed scripts/reddit.playwright.js.tmpl
@@ -17,7 +19,7 @@ var redditPlaywrightScriptParser = template.Must(template.New("reddit-playwright
 	},
 }).Parse(redditPlaywrightScriptTemplate))
 
-func RenderRedditPlaywrightScript(data PlaywrightScriptData) (string, error) {
+func RenderRedditPlaywrightScript(data sites.PlaywrightScriptData) (string, error) {
 	var buf bytes.Buffer
 	if err := redditPlaywrightScriptParser.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("渲染 reddit 脚本模板失败: %w", err)
