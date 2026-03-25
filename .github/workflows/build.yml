@@ -182,24 +182,25 @@ jobs:
       - name: Create or update GitHub release
         shell: bash
         env:
+          REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
           GH_TOKEN: ${{ github.token }}
           IS_MAIN: ${{ github.ref_name == 'main' }}
         run: |
           set -euo pipefail
 
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release edit "$TAG" --title "$TITLE" --notes-file release-notes.md
+          if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            gh release edit "$TAG" -R "$REPO" --title "$TITLE" --notes-file release-notes.md
           else
             create_args=("$TAG" --target "$SHA" --title "$TITLE" --notes-file release-notes.md)
             if [[ "$IS_MAIN" != "true" ]]; then
               create_args+=(--prerelease)
             fi
-            gh release create "${create_args[@]}"
+            gh release create -R "$REPO" "${create_args[@]}"
           fi
 
           shopt -s nullglob
           assets=(release-assets/*)
           if ((${#assets[@]})); then
-            gh release upload "$TAG" "${assets[@]}" --clobber
+            gh release upload "$TAG" -R "$REPO" "${assets[@]}" --clobber
           fi
