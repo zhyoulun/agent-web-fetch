@@ -182,6 +182,7 @@ jobs:
       - name: Create or update GitHub release
         shell: bash
         env:
+          SHA: ${{ github.sha }}
           GH_TOKEN: ${{ github.token }}
           IS_MAIN: ${{ github.ref_name == 'main' }}
         run: |
