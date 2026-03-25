@@ -1,6 +1,5 @@
 node_modules/
-.chrome-profile/
-.chrome-profile2/
+.chrome-profile*
 package-lock.json
 package.json
 .idea/

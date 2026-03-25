@@ -41,7 +41,7 @@ type ScriptResult struct {
 var playwrightFactory = src.NewPlaywrightFactory()
 
 func main() {
-	engine := flag.String("engine", "google", "搜索引擎: google/youtube/wikipedia/amazon/reddit/bing/duckduckgo/baidu/tiktok/chatgpt/grok/gemini")
+	engine := flag.String("engine", "google", "搜索引擎: google/youtube/wikipedia/amazon/reddit/bing/duckduckgo/baidu/tiktok/douban/imdb/github/piratebay/chatgpt/grok/gemini")
 	query := flag.String("query", "", "搜索关键词或问题")
 	profileDir := flag.String("profile-dir", "./.chrome-profile", "Chrome/Chromium User Data 目录")
 	channel := flag.String("channel", "chrome", "浏览器通道: chrome/chromium/msedge 等")
@@ -59,7 +59,7 @@ func main() {
 	}
 	engineValue := strings.ToLower(strings.TrimSpace(*engine))
 	if !playwrightFactory.Supports(engineValue) {
-		fmt.Fprintln(os.Stderr, "参数错误: --engine 仅支持 google/youtube/wikipedia/amazon/reddit/bing/duckduckgo/baidu/tiktok/chatgpt/grok/gemini")
+		fmt.Fprintln(os.Stderr, "参数错误: --engine 仅支持 google/youtube/wikipedia/amazon/reddit/bing/duckduckgo/baidu/tiktok/douban/imdb/github/piratebay/chatgpt/grok/gemini")
 		os.Exit(2)
 	}
 	if *maxResults <= 0 {

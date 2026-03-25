@@ -1,0 +1,186 @@
+const { chromium } = require('@playwright/test');
+const fs = require('fs');
+const path = require('path');
+
+const query = {{ js .Query }};
+const profileDir = {{ js .ProfileDir }};
+const channel = {{ js .Channel }};
+const maxResults = {{ .MaxResults }};
+const timeoutMs = {{ .TimeoutMS }};
+const headlessMode = {{ js .HeadlessMode }};
+const snapshot = {{ if .Snapshot }}true{{ else }}false{{ end }};
+const snapshotStamp = {{ js .SnapshotStamp }};
+const projectRoot = {{ js .ProjectRoot }};
+const outputJSON = {{ js .OutputPath }};
+const baseURL = 'https://thepiratebay.unblockninja.st';
+
+function writeResult(data) { fs.writeFileSync(outputJSON, JSON.stringify(data), 'utf8'); }
+function finish(data) { writeResult(data); process.exit(data.status === 'ok' ? 0 : 1); }
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+function selectors() {
+  return [
+    'a[href*="/description.php?id="]',
+    'a[href*="/torrent/"]'
+  ];
+}
+
+function detectHumanVerification(title, content) {
+  const lowTitle = String(title || '').toLowerCase();
+  const body = String(content || '').toLowerCase();
+  const markers = [
+    '请稍候',
+    'performing security check',
+    'security verification',
+    'cloudflare',
+    '验证您是否是真人',
+    '执行安全验证',
+    'checking if the site connection is secure'
+  ];
+  return markers.find(marker => lowTitle.includes(marker) || body.includes(marker.toLowerCase())) || '';
+}
+
+function normalizeLink(raw) {
+  if (!raw) return '';
+  let parsed;
+  try { parsed = new URL(String(raw).trim(), baseURL); } catch { return ''; }
+  if (!['http:', 'https:'].includes(parsed.protocol)) return '';
+  const host = parsed.hostname.toLowerCase();
+  if (host !== 'thepiratebay.unblockninja.st' && !host.includes('thepiratebay')) return '';
+  const ok = parsed.pathname.includes('/description.php') || parsed.pathname.includes('/torrent/');
+  if (!ok) return '';
+  parsed.hash = '';
+  return parsed.toString();
+}
+
+function normalizeTitle(raw) {
+  return String(raw || '').replace(/\s+/g, ' ').trim();
+}
+
+async function waitUntilReady(page, timeout, headless) {
+  const deadline = Date.now() + timeout;
+  let prompted = false;
+
+  while (Date.now() < deadline) {
+    for (const selector of selectors()) {
+      if (await page.locator(selector).count().catch(() => 0) > 0) {
+        return { mode: 'ready' };
+      }
+    }
+
+    const reason = detectHumanVerification(
+      await page.title().catch(() => ''),
+      await page.locator('body').innerText({ timeout: 1000 }).catch(() => '')
+    );
+    if (reason) {
+      if (headless) {
+        return { mode: 'human_verification', reason };
+      }
+      if (!prompted) {
+        prompted = true;
+        console.log('检测到 Pirate Bay 站点安全验证，请在浏览器中手动完成，程序会自动继续。');
+      }
+      await sleep(1200);
+      continue;
+    }
+
+    await sleep(800);
+  }
+
+  if (prompted) {
+    return { mode: 'error', error: '人工验证后仍未检测到 Pirate Bay 搜索结果，请重试' };
+  }
+  return { mode: 'error', error: '等待 Pirate Bay 搜索结果超时' };
+}
+
+async function collectResults(page, max) {
+  const results = [];
+  const seen = new Set();
+  let foundAny = false;
+
+  for (const selector of selectors()) {
+    const list = page.locator(selector);
+    const count = await list.count().catch(() => 0);
+    if (count <= 0) continue;
+    foundAny = true;
+
+    for (let i = 0; i < count && results.length < max; i++) {
+      const item = list.nth(i);
+      const payload = await item.evaluate(node => ({
+        href: String(node.getAttribute('href') || '').trim(),
+        title: String(node.textContent || '').replace(/\s+/g, ' ').trim()
+      })).catch(() => ({ href: '', title: '' }));
+
+      const url = normalizeLink(payload.href);
+      const title = normalizeTitle(payload.title);
+      if (!url || !title || seen.has(url)) continue;
+
+      seen.add(url);
+      results.push({ title, url });
+    }
+  }
+
+  if (!foundAny) return { error: '未找到 Pirate Bay 结果节点', results: [] };
+  if (results.length === 0) return { error: '未提取到有效的 Pirate Bay 条目结果', results: [] };
+  return { error: '', results };
+}
+
+function sanitizeFileName(input) {
+  const source = String(input || '').trim();
+  if (!source) return 'untitled';
+  const safe = source.replace(/[^a-zA-Z0-9\-_ ]+/g, '').replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^[-_]+|[-_]+$/g, '');
+  return safe ? safe.slice(0, 48) : 'untitled';
+}
+
+async function runAttempt(useHeadless) {
+  let context;
+  try {
+    context = await chromium.launchPersistentContext(profileDir, {
+      headless: false,
+      timeout: timeoutMs,
+      ignoreDefaultArgs: ['--enable-automation'],
+      args: ['--disable-blink-features=AutomationControlled'],
+      viewport: { width: 1440, height: 1600 },
+      locale: 'en-US',
+      ...(channel ? { channel } : {})
+    });
+    const page = await context.newPage();
+    await page.goto(baseURL + '/search.php?q=' + encodeURIComponent(query), { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+    const ready = await waitUntilReady(page, timeoutMs, useHeadless);
+    if (ready.mode === 'human_verification') {
+      return { status: 'human_verification', reason: ready.reason, results: [], snapshotPath: '' };
+    }
+    if (ready.mode === 'error') {
+      return { status: 'error', error: ready.error, results: [], snapshotPath: '' };
+    }
+    const collected = await collectResults(page, maxResults);
+    if (collected.error) return { status: 'error', error: collected.error, results: [], snapshotPath: '' };
+    let snapshotPath = '';
+    if (snapshot) {
+      await page.waitForLoadState('load', { timeout: 5000 }).catch(() => {});
+      await page.waitForTimeout(900);
+      const dir = path.join(projectRoot, 'snapshots', snapshotStamp);
+      fs.mkdirSync(dir, { recursive: true });
+      const filePath = path.join(dir, 'search-' + sanitizeFileName(query) + '.png');
+      await page.screenshot({ path: filePath, fullPage: true, timeout: 15000 });
+      snapshotPath = path.resolve(filePath);
+    }
+    return { status: 'ok', results: collected.results, snapshotPath };
+  } catch (error) {
+    return { status: 'error', error: String(error && error.message ? error.message : error), results: [], snapshotPath: '' };
+  } finally {
+    if (context) {
+      await Promise.race([context.close(), sleep(2000)]).catch(() => {});
+    }
+  }
+}
+
+async function main() {
+  if (!['true', 'false', 'first'].includes(headlessMode)) {
+    finish({ status: 'error', error: '不支持的 headless 模式', results: [], snapshotPath: '' });
+  }
+
+  finish(await runAttempt(false));
+}
+
+main();
